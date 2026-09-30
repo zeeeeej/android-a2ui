@@ -1,6 +1,8 @@
 package com.xpl.a2uichat
 
 import android.graphics.Bitmap
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
@@ -11,8 +13,11 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import com.xpl.a2uichat.chat.ChatViewModel
 import com.xpl.a2uichat.chat.MessageStatus
+import com.xpl.a2uichat.games.GameKey
+import com.xpl.a2uichat.games.SnakeStatus
 import java.io.File
 import org.junit.Assert.*
+import org.junit.After
 import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
@@ -20,6 +25,10 @@ import org.junit.Test
 /** Opt-in: consumes a small number of requests using the debug key. Never logs prompts/keys. */
 class LiveDeepSeekTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
+    private var originalOrientation: Int? = null
+    @After fun restoreOrientation() {
+        originalOrientation?.let { original -> compose.runOnUiThread { compose.activity.requestedOrientation = original } }
+    }
     private fun model() = ViewModelProvider(compose.activity)[ChatViewModel::class.java]
 
     private fun runTurn(prompt: String, stream: Boolean) {
@@ -40,10 +49,65 @@ class LiveDeepSeekTest {
         }
         compose.waitForIdle()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
+        // Compose idleness does not include the system window enter/exit animation.
+        instrumentation.uiAutomation.waitForIdle(500, 5_000)
         val folder = File(instrumentation.targetContext.getExternalFilesDir(null), "verification").apply { mkdirs() }
         instrumentation.uiAutomation.takeScreenshot().let { bitmap ->
             File(folder, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
         }
+    }
+
+    @Test fun nativeGamesCompleteAndStreaming() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("runLive") == "true")
+        runTurn("生成一个可以玩的 2048。直接把 Game2048 作为 root。", false)
+        compose.onNodeWithTag("game_board").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("game_left").performScrollTo().performClick()
+        compose.onNodeWithTag("game_down").performScrollTo().performClick()
+        compose.onNodeWithTag("game_right").performScrollTo().performClick()
+        val key = GameKey(model().surfaces.value.single().id, "root", "Game2048")
+        val board = model().games.get(key).board2048
+        assertTrue(board.moves > 0)
+        compose.activityRule.scenario.recreate()
+        compose.runOnIdle { assertEquals(board, model().games.get(key).board2048) }
+        compose.onNodeWithTag("game_expand").performScrollTo().performClick()
+        screenshot("08-game-2048-fullscreen")
+        originalOrientation = compose.activity.requestedOrientation
+        try {
+            compose.runOnUiThread { compose.activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE }
+            compose.waitUntil(10_000) { compose.activity.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE }
+            compose.waitForIdle()
+            compose.onNodeWithTag("game_expand").performScrollTo().performClick()
+            compose.onNodeWithTag("game_board").assertIsDisplayed()
+            compose.onNodeWithTag("game_result").assertIsDisplayed()
+            compose.runOnIdle { assertEquals(board, model().games.get(key).board2048) }
+            screenshot("08b-game-2048-landscape")
+        } finally {
+            // UNSPECIFIED can retain the last orientation until a physical sensor change.
+            // Explicitly return to portrait for the remaining UI checks; @After restores policy.
+            compose.runOnUiThread { compose.activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
+        }
+        compose.waitUntil(10_000) { compose.activity.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT }
+        compose.waitForIdle()
+        compose.onNodeWithTag("game_expand").performScrollTo().performClick()
+        compose.onNodeWithTag("game_result").performScrollTo().performClick()
+        compose.waitUntil(180_000) { model().state.value.messages.size >= 4 && !model().state.value.busy }
+        compose.runOnIdle {
+            assertEquals(MessageStatus.Complete, model().state.value.messages.last().status)
+            assertEquals(board, model().games.get(key).board2048)
+        }
+        compose.runOnUiThread { model().newChat() }
+        runTurn("来一局简单难度的贪吃蛇。直接把 SnakeGame 作为 root。", true)
+        compose.onNodeWithTag("game_board").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("game_expand").performScrollTo().performClick()
+        compose.onNodeWithTag("game_run").performClick()
+        val snakeKey = GameKey(model().surfaces.value.single().id, "root", "SnakeGame")
+        compose.waitUntil(3000) { model().games.get(snakeKey).snake.moves > 0 }
+        compose.onNodeWithTag("game_up").performClick()
+        compose.onNodeWithTag("game_run").performClick()
+        compose.runOnIdle { assertEquals(SnakeStatus.Paused, model().games.get(snakeKey).snake.status) }
+        screenshot("09-game-snake-fullscreen")
+        compose.onNodeWithTag("game_collapse").performClick()
+        screenshot("10-game-snake-card")
     }
 
     @Test fun completeThenStreamingEndToEnd() {

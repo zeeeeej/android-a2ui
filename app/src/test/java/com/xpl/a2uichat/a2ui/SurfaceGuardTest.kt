@@ -8,6 +8,41 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SurfaceGuardTest {
+    @Test fun gamesValidateAndProduceIsolatedKeys() {
+        val guard = SurfaceGuard()
+        for (type in listOf("Game2048", "SnakeGame")) {
+            val reply = agentJson.decodeFromString<AgentReply>(AgentPrompt.gameExample("s_test_$type", type))
+            reply.a2uiMessages.forEach { guard.accept(it, "s_test_") }
+        }
+        guard.validateComplete()
+        assertEquals(2, guard.gameKeys().size)
+        assertEquals(setOf("Game2048", "SnakeGame"), guard.gameKeys().map { it.type }.toSet())
+    }
+
+    @Test fun invalidGameConfigurationRejectedBeforeRender() {
+        for (replacement in listOf("\"gameId\":\"wrong\"", "\"gameId\":123", "\"gameId\":\"root\",\"difficulty\":\"extreme\"",
+            "\"gameId\":\"root\",\"title\":42", "\"gameId\":\"root\",\"child\":\"root\"")) {
+            val reply = agentJson.decodeFromString<AgentReply>(AgentPrompt.gameExample("s_test_game")
+                .replace("\"gameId\":\"root\"", replacement).replace("\"title\":\"2048\"", "\"unused\":true"))
+            assertThrows(AgentException::class.java) {
+                val guard = SurfaceGuard()
+                reply.a2uiMessages.forEach { guard.accept(it, "s_test_") }
+                guard.validateComplete()
+            }
+        }
+    }
+
+    @Test fun detachedGamesDoNotKeepStateAndRepeatedGamesAreRejected() {
+        val guard = SurfaceGuard()
+        agentJson.decodeFromString<AgentReply>(AgentPrompt.gameExample("s_test_game")).a2uiMessages.forEach { guard.accept(it, "s_test_") }
+        fun update(components: String) = agentJson.parseToJsonElement("""{"version":"v0.9","updateComponents":{"surfaceId":"s_test_game","components":$components}}""").jsonObject
+        guard.accept(update("""[{"id":"root","component":"Column","children":["game","game"]},{"id":"game","component":"SnakeGame","gameId":"game"}]"""), "s_test_")
+        assertThrows(AgentException::class.java) { guard.validateComplete() }
+        guard.accept(update("""[{"id":"root","component":"Text","text":"已移除"}]"""), "s_test_")
+        guard.validateComplete()
+        assertTrue(guard.gameKeys().isEmpty())
+    }
+
     private fun example() = agentJson.decodeFromString<AgentReply>(AgentPrompt.formExample("s_test_form"))
     @Test fun formExampleIsAValidBoundedTree() {
         val guard = SurfaceGuard()

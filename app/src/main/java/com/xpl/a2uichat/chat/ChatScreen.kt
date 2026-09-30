@@ -22,6 +22,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -37,13 +40,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.xpl.a2uichat.BuildConfig
+import com.xpl.a2uichat.games.GameHost
+import com.xpl.a2uichat.games.GameSessionStore
+import com.xpl.a2uichat.games.LocalGameHost
 
 @Composable
 fun ChatScreen(viewModel: ChatViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val surfaces by viewModel.surfaces.collectAsStateWithLifecycle()
     ChatContent(state, surfaces, viewModel::setDraft, { viewModel.send() }, viewModel::send,
-        viewModel::stop, viewModel::retry, viewModel::newChat, viewModel::setStreaming, viewModel::canInteract)
+        viewModel::stop, viewModel::retry, viewModel::newChat, viewModel::setStreaming, viewModel::canInteract, viewModel.games)
 }
 
 @Composable
@@ -58,8 +64,11 @@ fun ChatContent(
     onNewChat: () -> Unit,
     onStreaming: (Boolean) -> Unit,
     canInteract: (String) -> Boolean,
+    games: GameSessionStore,
 ) {
+    var viewport by remember { mutableStateOf(Rect.Zero) }
     var confirmNew by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(confirmNew) { if (confirmNew) games.pauseAll() }
     val listState = rememberLazyListState()
     val dragging by listState.interactionSource.collectIsDraggedAsState()
     var followOutput by remember { mutableStateOf(true) }
@@ -75,18 +84,19 @@ fun ChatContent(
     }
     LaunchedEffect(state.messages.size) {
         followOutput = true
-        if (state.messages.isNotEmpty()) listState.scrollToItem(state.messages.lastIndex)
+        if (state.messages.isNotEmpty()) listState.requestScrollToItem(state.messages.lastIndex)
     }
     LaunchedEffect(listState) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.let { it.index to it.size } }
             .collect {
                 if (followOutput && listState.layoutInfo.totalItemsCount > 0 && listState.canScrollForward) {
-                    listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1, Int.MAX_VALUE)
+                    // Layout changes may emit inside measurement; schedule, never force a nested measure.
+                    listState.requestScrollToItem(listState.layoutInfo.totalItemsCount - 1, Int.MAX_VALUE)
                 }
             }
     }
     LaunchedEffect(state.messages.lastOrNull()?.text, surfaces.size, state.messages.lastOrNull()?.status) {
-        if (followOutput && state.messages.isNotEmpty()) listState.scrollToItem(state.messages.lastIndex, Int.MAX_VALUE)
+        if (followOutput && state.messages.isNotEmpty()) listState.requestScrollToItem(state.messages.lastIndex, Int.MAX_VALUE)
     }
     Surface(Modifier.fillMaxSize(), color = colors.background) {
         Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
@@ -107,11 +117,12 @@ fun ChatContent(
                 if (state.messages.isEmpty()) {
                     Welcome(onSuggestion)
                 } else {
-                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize().testTag("messages"),
+                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize().testTag("messages")
+                        .onGloballyPositioned { viewport = it.boundsInWindow() },
                         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 24.dp),
                         verticalArrangement = Arrangement.spacedBy(24.dp)) {
                         items(state.messages, key = { it.id }) { message ->
-                            MessageItem(message, surfaces, state.busy, canInteract,
+                            MessageItem(message, surfaces, state.busy, canInteract, games, viewport,
                                 onRetry = onRetry, retryEnabled = state.retryId == message.id && !state.busy)
                         }
                     }
@@ -174,6 +185,8 @@ private fun Welcome(onSuggestion: (String) -> Unit) {
         item { Suggestion("01", "规划今天", "把待办变成可勾选的任务清单", "帮我生成一张今天的学习任务清单，包含可勾选的任务和提交按钮。", onSuggestion) }
         item { Suggestion("02", "安排周末", "填写偏好，获得专属的出行建议", "制作一个周末出行偏好表单，让我填写城市、预算，勾选是否喜欢户外，再提交生成建议。", onSuggestion) }
         item { Suggestion("03", "随便聊聊", "探索一个新知识，或理清一个想法", "用一个生活中的例子，简单解释什么是 AI Agent。", onSuggestion) }
+        item { Suggestion("04", "玩 2048", "滑动合并数字，挑战 2048", "生成一个可以玩的 2048。", onSuggestion) }
+        item { Suggestion("05", "玩贪吃蛇", "来一局轻松的原生小游戏", "来一局简单难度的贪吃蛇。", onSuggestion) }
     }
 }
 
@@ -195,7 +208,8 @@ private fun Suggestion(number: String, title: String, subtitle: String, prompt: 
 
 @Composable
 private fun MessageItem(message: UiMessage, surfaces: List<A2uiSurfaceModel>, busy: Boolean,
-    canInteract: (String) -> Boolean, onRetry: () -> Unit, retryEnabled: Boolean) {
+    canInteract: (String) -> Boolean, games: GameSessionStore, viewport: Rect,
+    onRetry: () -> Unit, retryEnabled: Boolean) {
     val colors = MaterialTheme.colorScheme
     Column(Modifier.fillMaxWidth(), horizontalAlignment = if (message.isUser) Alignment.End else Alignment.Start) {
         if (message.isUser) {
@@ -222,11 +236,15 @@ private fun MessageItem(message: UiMessage, surfaces: List<A2uiSurfaceModel>, bu
             message.surfaceIds.forEach { id ->
                 val surface = surfaces.find { it.id == id } ?: return@forEach
                 val enabled = !busy && canInteract(id)
-                Box(Modifier.padding(top = 14.dp).fillMaxWidth().testTag("surface_$id")
-                    .then(if (enabled) Modifier else Modifier.alpha(.65f).blockInteraction())) {
-                    A2uiSurface(surfaceModel = surface, modifier = Modifier.fillMaxWidth(),
-                        errorContent = { Text("卡片暂时无法显示，请重试。", color = colors.error, modifier = Modifier.padding(16.dp)) },
-                        loadingContent = { Text("正在准备卡片…", color = colors.onSurfaceVariant, modifier = Modifier.padding(16.dp)) })
+                key(id) {
+                    CompositionLocalProvider(LocalGameHost provides GameHost(games, id, enabled, viewport)) {
+                        Box(Modifier.padding(top = 14.dp).fillMaxWidth().testTag("surface_$id")
+                            .then(if (enabled) Modifier else Modifier.alpha(.65f).blockInteraction())) {
+                            A2uiSurface(surfaceModel = surface, modifier = Modifier.fillMaxWidth(),
+                                errorContent = { Text("卡片暂时无法显示，请重试。", color = colors.error, modifier = Modifier.padding(16.dp)) },
+                                loadingContent = { Text("正在准备卡片…", color = colors.onSurfaceVariant, modifier = Modifier.padding(16.dp)) })
+                        }
+                    }
                 }
             }
             message.error?.let { error ->

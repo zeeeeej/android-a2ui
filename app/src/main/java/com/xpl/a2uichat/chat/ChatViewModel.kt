@@ -10,6 +10,7 @@ import com.xpl.a2uichat.a2ui.AgentPrompt
 import com.xpl.a2uichat.a2ui.SurfaceGuard
 import com.xpl.a2uichat.a2ui.toJsonValue
 import com.xpl.a2uichat.network.*
+import com.xpl.a2uichat.games.GameSessionStore
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -41,6 +42,7 @@ class ChatViewModel(
     private val client: AgentClient = DeepSeekClient(BuildConfig.DEEPSEEK_API_KEY,
         BuildConfig.DEEPSEEK_MODEL, BuildConfig.DEEPSEEK_URL),
 ) : ViewModel() {
+    val games = GameSessionStore()
     private val mutableState = MutableStateFlow(ChatState())
     val state = mutableState.asStateFlow()
     private val mutableSurfaces = MutableStateFlow<List<A2uiSurfaceModel>>(emptyList())
@@ -108,6 +110,7 @@ class ChatViewModel(
     }
 
     fun newChat() {
+        games.clear()
         epoch++
         generation?.cancel()
         surfaceCollection?.cancel()
@@ -123,6 +126,7 @@ class ChatViewModel(
     }
 
     private fun generate(turn: PendingTurn) {
+        games.pauseAll()
         val ownEpoch = ++epoch
         mutableState.value = state.value.copy(busy = true, retryId = null)
         val transaction = guard.copy()
@@ -163,6 +167,7 @@ class ChatViewModel(
                             session.awaitApplied(transaction.ids)
                             if (touched.any { it in invalidSurfaces }) throw AgentException("卡片更新失败，请重试。")
                             guard = transaction
+                            games.retain(guard.gameKeys())
                             history = turn.baseHistory + ChatMessage("user", turn.apiContent) + ChatMessage("assistant", event.raw)
                             update(turn.id) { it.copy(text = event.reply.text, status = MessageStatus.Complete) }
                         }
@@ -209,10 +214,15 @@ class ChatViewModel(
             put("clientDataModel", event.clientDataModel?.surfaces.toJsonValue())
         }
         val details = event.context.values.filterNotNull().joinToString(" · ").take(100)
-        startTurn(if (details.isBlank()) "已提交卡片" else "已提交：$details", payload.toString())
+        val label = if (event.type == "game_result") {
+            val name = if (event.context["game"] == "snake") "贪吃蛇" else "2048"
+            "$name 得分 ${event.context["score"]}，请帮我点评"
+        } else if (details.isBlank()) "已提交卡片" else "已提交：$details"
+        startTurn(label, payload.toString())
     }
 
     private fun discardPartial(turn: PendingTurn) {
+        games.removeSurfaces(turn.created)
         turn.created.forEach { session.delete(it); surfaceOwners.remove(it); invalidSurfaces.remove(it) }
         turn.created.clear()
         update(turn.id) { it.copy(surfaceIds = emptyList()) }
@@ -222,5 +232,5 @@ class ChatViewModel(
         mutableState.value = state.value.copy(messages = state.value.messages.map { if (it.id == id) transform(it) else it })
     }
 
-    override fun onCleared() { session.close() }
+    override fun onCleared() { games.clear(); session.close() }
 }

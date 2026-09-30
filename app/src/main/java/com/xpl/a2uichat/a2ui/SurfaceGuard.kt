@@ -1,12 +1,29 @@
 package com.xpl.a2uichat.a2ui
 
 import com.xpl.a2uichat.network.AgentException
+import com.xpl.a2uichat.games.GameKey
 import kotlinx.serialization.json.*
 
 /** Bounded static component trees keep model output inside the app's supported catalog. */
 class SurfaceGuard(private val catalogId: String = CHAT_CATALOG_ID) {
     private val surfaces = linkedMapOf<String, LinkedHashMap<String, JsonObject>>()
     val ids: Set<String> get() = surfaces.keys.toSet()
+
+    /** Only reachable game nodes own live state; detached/replaced nodes are discarded. */
+    fun gameKeys(): Set<GameKey> = buildSet {
+        surfaces.forEach { (surfaceId, tree) ->
+            val visited = mutableSetOf<String>()
+            fun visit(id: String) {
+                if (!visited.add(id)) return
+                val node = tree[id] ?: return
+                val type = node["component"]?.jsonPrimitive?.content
+                if (type in GAME_COMPONENTS) add(GameKey(surfaceId, id, type!!))
+                (node["children"] as? JsonArray)?.forEach { visit(it.jsonPrimitive.content) }
+                node["child"]?.jsonPrimitive?.content?.let(::visit)
+            }
+            visit("root")
+        }
+    }
 
     fun copy(): SurfaceGuard = SurfaceGuard(catalogId).also { guard ->
         surfaces.forEach { (id, components) -> guard.surfaces[id] = LinkedHashMap(components) }
@@ -37,6 +54,7 @@ class SurfaceGuard(private val catalogId: String = CHAT_CATALOG_ID) {
                     val componentId = component["id"]?.jsonPrimitive?.contentOrNull ?: invalid()
                     requireUi(componentId.length in 1..100)
                     requireUi(component["component"]?.jsonPrimitive?.content in COMPONENTS)
+                    validateGame(component, componentId)
                     forbidUnsupported(component)
                     current[componentId] = component
                 }
@@ -58,6 +76,18 @@ class SurfaceGuard(private val catalogId: String = CHAT_CATALOG_ID) {
         surfaces.values.forEach { tree ->
             requireUi("root" in tree)
             validateTree(tree, complete = true)
+            // A shared ancestor would render the same game twice (and could start two clocks).
+            val incoming = mutableMapOf("root" to 1)
+            val hasGame = mutableMapOf<String, Boolean>()
+            fun children(node: JsonObject): List<String> =
+                (node["children"] as? JsonArray)?.map { it.jsonPrimitive.content }.orEmpty() +
+                    listOfNotNull(node["child"]?.jsonPrimitive?.content)
+            fun containsGame(id: String): Boolean = hasGame.getOrPut(id) {
+                val node = tree.getValue(id)
+                node["component"]?.jsonPrimitive?.content in GAME_COMPONENTS || children(node).any(::containsGame)
+            }
+            tree.values.forEach { node -> children(node).forEach { incoming[it] = (incoming[it] ?: 0) + 1 } }
+            tree.keys.forEach { id -> if (containsGame(id)) requireUi((incoming[id] ?: 0) <= 1) }
         }
     }
 
@@ -107,10 +137,27 @@ class SurfaceGuard(private val catalogId: String = CHAT_CATALOG_ID) {
         }
     }
 
+    private fun validateGame(component: JsonObject, id: String) {
+        val type = component["component"]?.jsonPrimitive?.content
+        if (type !in GAME_COMPONENTS) return
+        val gameId = component["gameId"] as? JsonPrimitive
+        requireUi(gameId?.isString == true && gameId.content == id)
+        component["title"]?.let { value ->
+            val title = value as? JsonPrimitive
+            requireUi(title?.isString == true && title.content.length in 1..80)
+        }
+        component["difficulty"]?.let { value ->
+            val difficulty = value as? JsonPrimitive
+            requireUi(type == "SnakeGame" && difficulty?.isString == true && difficulty.content in setOf("easy", "normal", "hard"))
+        }
+        requireUi("children" !in component && "child" !in component)
+    }
+
     private fun requireUi(condition: Boolean) { if (!condition) invalid() }
     private fun invalid(): Nothing = throw AgentException("卡片结构无效，请重试或要求生成更简单的卡片。")
 
     companion object {
-        val COMPONENTS = setOf("Text", "Row", "Column", "Card", "List", "Button", "TextField", "CheckBox", "Divider")
+        val GAME_COMPONENTS = setOf("Game2048", "SnakeGame")
+        val COMPONENTS = setOf("Text", "Row", "Column", "Card", "List", "Button", "TextField", "CheckBox", "Divider") + GAME_COMPONENTS
     }
 }
