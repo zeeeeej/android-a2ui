@@ -1,5 +1,7 @@
 package com.xpl.a2uichat.chat
 
+import kotlinx.serialization.json.*
+
 import androidx.a2ui.model.processor.A2uiSurfaceModel
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -34,11 +36,15 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.xpl.a2uichat.BuildConfig
 import com.xpl.a2uichat.games.GameHost
 import com.xpl.a2uichat.games.GameSessionStore
@@ -48,8 +54,16 @@ import com.xpl.a2uichat.games.LocalGameHost
 fun ChatScreen(viewModel: ChatViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val surfaces by viewModel.surfaces.collectAsStateWithLifecycle()
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(viewModel, lifecycle) {
+        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_STOP) viewModel.flush() }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer); viewModel.flush() }
+    }
     ChatContent(state, surfaces, viewModel::setDraft, { viewModel.send() }, viewModel::send,
-        viewModel::stop, viewModel::retry, viewModel::newChat, viewModel::setStreaming, viewModel::canInteract, viewModel.games)
+        viewModel::stop, viewModel::retry, viewModel::newChat, viewModel::setStreaming, viewModel::canInteract, viewModel.games,
+        viewModel::toggleFavorite, viewModel::openFavorite, viewModel::removeFavorite,
+        { if (state.storageBlocked) viewModel.reloadSaved() else viewModel.flush() })
 }
 
 @Composable
@@ -65,10 +79,19 @@ fun ChatContent(
     onStreaming: (Boolean) -> Unit,
     canInteract: (String) -> Boolean,
     games: GameSessionStore,
+    onFavorite: () -> Unit,
+    onOpenFavorite: (String) -> Unit,
+    onRemoveFavorite: (String) -> Unit,
+    onStorageRetry: () -> Unit,
 ) {
     var viewport by remember { mutableStateOf(Rect.Zero) }
     var confirmNew by rememberSaveable { mutableStateOf(false) }
+    var showFavorites by rememberSaveable { mutableStateOf(false) }
+    var menu by remember { mutableStateOf(false) }
+    var openTarget by remember { mutableStateOf<SavedConversation?>(null) }
+    val locked = state.loading || state.storageBusy || state.storageBlocked
     LaunchedEffect(confirmNew) { if (confirmNew) games.pauseAll() }
+    LaunchedEffect(showFavorites) { if (showFavorites) games.pauseAll() }
     val listState = rememberLazyListState()
     val dragging by listState.interactionSource.collectIsDraggedAsState()
     var followOutput by remember { mutableStateOf(true) }
@@ -82,7 +105,7 @@ fun ChatContent(
     LaunchedEffect(state.busy) {
         if (state.busy) { focus.clearFocus(); keyboard?.hide() }
     }
-    LaunchedEffect(state.messages.size) {
+    LaunchedEffect(state.conversationId, state.messages.size) {
         followOutput = true
         if (state.messages.isNotEmpty()) listState.requestScrollToItem(state.messages.lastIndex)
     }
@@ -104,17 +127,39 @@ fun ChatContent(
                 verticalAlignment = Alignment.CenterVertically) {
                 Spark(Modifier.size(38.dp))
                 Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                    Text("A2UI Chat", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Text("DEEPSEEK  /  原生交互", fontSize = 10.sp, letterSpacing = 1.sp, color = colors.onSurfaceVariant)
+                    Text("A2UI Chat", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1)
+                    Text("原生交互", fontSize = 10.sp, letterSpacing = 1.sp, maxLines = 1, color = colors.onSurfaceVariant)
                 }
+                IconButton(onClick = onFavorite, enabled = !locked && !state.busy && state.messages.isNotEmpty(),
+                    modifier = Modifier.testTag("favorite_chat").semantics {
+                        contentDescription = if (state.favorite) "取消收藏当前对话" else "收藏当前对话"
+                    }) { Text(if (state.favorite) "★" else "☆", fontSize = 25.sp, color = colors.primary) }
                 OutlinedButton(onClick = { if (state.messages.isEmpty()) onNewChat() else confirmNew = true },
-                    contentPadding = PaddingValues(horizontal = 14.dp), modifier = Modifier.testTag("new_chat")) {
+                    enabled = !locked && !state.busy,
+                    contentPadding = PaddingValues(horizontal = 8.dp), modifier = Modifier.testTag("new_chat")) {
                     Text("＋ 新对话", fontSize = 12.sp)
+                }
+                Box {
+                    IconButton(onClick = { menu = true }, modifier = Modifier.testTag("chat_menu")) {
+                        Text("⋮", fontSize = 25.sp, modifier = Modifier.clearAndSetSemantics { contentDescription = "对话菜单" })
+                    }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text("收藏对话") }, onClick = { menu = false; showFavorites = true },
+                            modifier = Modifier.testTag("favorites_list"))
+                    }
                 }
             }
             HorizontalDivider(color = colors.outlineVariant.copy(alpha = .6f))
+            state.storageError?.let { error ->
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(error, Modifier.weight(1f).testTag("storage_error"), color = colors.error, style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = onStorageRetry, enabled = !state.loading && !state.storageBusy) { Text("重试") }
+                }
+            }
             Box(Modifier.weight(1f).fillMaxWidth()) {
-                if (state.messages.isEmpty()) {
+                if (state.loading) {
+                    CircularProgressIndicator(Modifier.align(Alignment.Center).testTag("loading_chat"))
+                } else if (state.messages.isEmpty()) {
                     Welcome(onSuggestion)
                 } else {
                     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().testTag("messages")
@@ -134,11 +179,12 @@ fun ChatContent(
                     Text(if (state.busy) "正在生成${if (state.streaming) " · 流式" else " · 完整回复"}" else BuildConfig.DEEPSEEK_MODEL,
                         Modifier.weight(1f).padding(start = 7.dp), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                     Text("流式", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                    Switch(checked = state.streaming, onCheckedChange = onStreaming, enabled = !state.busy,
+                    Switch(checked = state.streaming, onCheckedChange = onStreaming, enabled = !state.busy && !locked,
                         modifier = Modifier.padding(start = 6.dp).testTag("streaming"))
                 }
                 Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedTextField(value = state.draft, onValueChange = onDraft,
+                        enabled = !locked,
                         placeholder = { Text("聊点什么，或让 AI 生成一张卡片…", fontSize = 14.sp) },
                         modifier = Modifier.weight(1f).testTag("chat_input"), shape = RoundedCornerShape(22.dp),
                         minLines = 1, maxLines = 5,
@@ -146,7 +192,7 @@ fun ChatContent(
                         keyboardActions = KeyboardActions(onSend = { if (!state.busy) onSend() }),
                         colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = colors.outlineVariant))
                     FilledIconButton(onClick = if (state.busy) onStop else onSend,
-                        enabled = state.busy || state.draft.isNotBlank(),
+                        enabled = !locked && (state.busy || state.draft.isNotBlank()),
                         modifier = Modifier.size(56.dp).testTag(if (state.busy) "stop" else "send"),
                         shape = RoundedCornerShape(19.dp)) {
                         Text(if (state.busy) "■" else "↑", fontSize = 26.sp,
@@ -159,9 +205,24 @@ fun ChatContent(
         }
     }
     if (confirmNew) AlertDialog(onDismissRequest = { confirmNew = false },
-        title = { Text("开启新对话？") }, text = { Text("当前消息和卡片将被清空。") },
+        title = { Text("开启新对话？") }, text = { Text(if (state.favorite)
+            "当前对话已收藏，将保留文字和卡片。重新打开时游戏重新开局，不保存棋局进度。"
+            else "当前对话未收藏，新建后将被替换。请先收藏需要保留的内容；游戏进度不保存。") },
         confirmButton = { TextButton(onClick = { confirmNew = false; onNewChat() }) { Text("新建对话") } },
         dismissButton = { TextButton(onClick = { confirmNew = false }) { Text("取消") } })
+    if (showFavorites) ConversationFavoritesSheet(state, onDismiss = { showFavorites = false }, onRemove = onRemoveFavorite,
+        onOpen = { target ->
+            if (target.id == state.conversationId) showFavorites = false
+            else { showFavorites = false; openTarget = target }
+        })
+    openTarget?.let { target ->
+        AlertDialog(onDismissRequest = { openTarget = null }, title = { Text("打开收藏对话？") },
+            text = { Text(if (!state.favorite && state.messages.isNotEmpty())
+                "当前未收藏的对话将被替换。收藏中的文字和卡片会恢复，游戏重新开局。"
+                else "将打开“${target.title}”并可继续聊天，游戏重新开局，不保存当前棋局进度。") },
+            confirmButton = { TextButton(onClick = { openTarget = null; onOpenFavorite(target.id) }, enabled = !locked && !state.busy) { Text("打开对话") } },
+            dismissButton = { TextButton(onClick = { openTarget = null }) { Text("取消") } })
+    }
 }
 
 @Composable
@@ -232,8 +293,27 @@ private fun MessageItem(message: UiMessage, surfaces: List<A2uiSurfaceModel>, bu
             if (message.status == MessageStatus.Generating) {
                 Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                    Text(if (message.text.isEmpty()) "正在构思…" else "正在生成…", Modifier.padding(start = 8.dp),
+                    Text(message.progress ?: if (message.text.isEmpty()) "正在构思…" else "正在生成…", Modifier.padding(start = 8.dp),
                         color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+            message.gamePlan?.let { plan ->
+                var expandedChecks by remember(message.id) { mutableStateOf(false) }
+                TextButton(onClick = { expandedChecks = !expandedChecks },modifier = Modifier.testTag("game_checks")) { Text(if (expandedChecks) "收起需求与检查结果" else "需求与检查结果") }
+                if (expandedChecks) {
+                    val report = message.verification
+                    Text(if (report == null) "尚未完成验收" else if (report["passed"] == JsonPrimitive(false)) "此候选未通过验收，未应用到游戏。" else if (report["current"] == JsonPrimitive(false)) "规则或验收版本已变化，此报告已失效。" else "以下是该次候选规则的检查记录，不代表完整规则正确性证明。",style = MaterialTheme.typography.bodySmall)
+                    val rows = report?.get("review")?.jsonObject?.get("requirements")?.jsonArray.orEmpty()
+                    plan["requirements"]?.jsonArray?.forEach { item ->
+                        val r = item.jsonObject
+                        val id = r["id"]?.jsonPrimitive?.content
+                        val row = rows.firstOrNull { it.jsonObject["id"]?.jsonPrimitive?.content == id }?.jsonObject
+                        Text("$id · ${r["text"]?.jsonPrimitive?.content}\n" +
+                            (if (row == null) "待检查" else if (row["passed"] == JsonPrimitive(true)) "复核通过：" else "未通过：") +
+                            (row?.get("evidence")?.jsonPrimitive?.content ?: ""),Modifier.padding(vertical = 4.dp),style = MaterialTheme.typography.bodySmall)
+                    }
+                    report?.get("failures")?.jsonArray?.forEach { Text(it.jsonPrimitive.content,color = colors.error,style = MaterialTheme.typography.bodySmall) }
+                    report?.get("fingerprint")?.jsonPrimitive?.content?.let { Text("规则指纹 ${it.take(16)} · 验收版本 ${report["verifierVersion"]}",style = MaterialTheme.typography.labelSmall) }
                 }
             }
             message.surfaceIds.forEach { id ->

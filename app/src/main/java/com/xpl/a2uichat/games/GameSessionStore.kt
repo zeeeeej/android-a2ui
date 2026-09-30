@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
 import com.xpl.a2uichat.games.rules.RuleGameSession
 import kotlinx.serialization.json.JsonObject
+import com.xpl.a2uichat.chat.SavedRule
 
 data class GameKey(val surfaceId: String, val gameId: String, val type: String)
 
@@ -52,26 +53,44 @@ class GameSession(override val key: GameKey, difficulty: Difficulty) : PlayableS
 /** Main-thread, ViewModel-owned state. No renderer/protocol probe creates timers. */
 class GameSessionStore {
     private val sessions = mutableMapOf<GameKey, PlayableSession>()
+    private val initialRules = mutableMapOf<GameKey, JsonObject>()
+    var onRulesChanged: () -> Unit = {}
+    fun restoreRules(rules: List<SavedRule>) {
+        rules.forEach { initialRules[GameKey(it.surfaceId, it.gameId, it.type)] = it.source }
+    }
+    fun savedRules(): List<SavedRule> {
+        val sources = initialRules.toMutableMap()
+        sessions.forEach { (key, session) ->
+            val source = when (session) {
+                is RuleGameSession -> session.frame.value.spec?.source
+                is com.xpl.a2uichat.games.script.ScriptGameSession -> session.activeRules()
+                else -> null
+            }
+            if (source != null) sources[key] = source
+        }
+        return sources.map { (key, source) -> SavedRule(key.surfaceId, key.gameId, key.type, source) }
+    }
     fun get(key: GameKey, difficulty: Difficulty = Difficulty.Normal): GameSession =
         sessions.getOrPut(key) { GameSession(key, difficulty) } as GameSession
     fun findRule(key: GameKey) = sessions[key] as? RuleGameSession
     fun findScript(key: GameKey) = sessions[key] as? com.xpl.a2uichat.games.script.ScriptGameSession
     fun script(key: GameKey, source: JsonObject): com.xpl.a2uichat.games.script.ScriptGameSession =
-        sessions.getOrPut(key) { com.xpl.a2uichat.games.script.ScriptGameSession(key, source) } as com.xpl.a2uichat.games.script.ScriptGameSession
+        sessions.getOrPut(key) { com.xpl.a2uichat.games.script.ScriptGameSession(key, initialRules[key] ?: source) } as com.xpl.a2uichat.games.script.ScriptGameSession
     fun rule(key: GameKey, source: JsonObject): RuleGameSession =
-        sessions.getOrPut(key) { RuleGameSession(key, source) } as RuleGameSession
+        sessions.getOrPut(key) { RuleGameSession(key, initialRules[key] ?: source) } as RuleGameSession
     fun resume(session: PlayableSession) {
         pauseAll()
         if (sessions[session.key] === session) session.resume()
     }
     fun pauseAll() { sessions.values.forEach { it.pause() } }
     fun retain(keys: Set<GameKey>) {
+        initialRules.keys.retainAll(keys)
         sessions.keys.filterNot { it in keys }.forEach { sessions.remove(it)?.dispose() }
     }
     fun removeSurfaces(ids: Set<String>) {
         retain(sessions.keys.filterNot { it.surfaceId in ids }.toSet())
     }
-    fun clear() { sessions.values.forEach { it.dispose() }; sessions.clear() }
+    fun clear() { sessions.values.forEach { it.dispose() }; sessions.clear(); initialRules.clear() }
 }
 
 /** Owned by the sole visible renderer. Cancellation drops elapsed time; no catch-up ticks. */

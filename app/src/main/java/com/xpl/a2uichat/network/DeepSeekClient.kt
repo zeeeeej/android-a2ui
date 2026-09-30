@@ -28,7 +28,19 @@ import kotlin.coroutines.resumeWithException
 
 interface AgentClient {
     fun reply(messages: List<ChatMessage>, stream: Boolean): Flow<AgentEvent>
+    fun reply(messages: List<ChatMessage>, stream: Boolean, maxTokens: Int): Flow<AgentEvent> = reply(messages, stream)
 }
+
+object ReplyBudget {
+    const val CHAT = 8192
+    const val GAME = 32768
+    const val REVIEW = 16384
+}
+
+class ReplyLengthException(val maxTokens: Int, val completionTokens: Int?) : AgentException(
+    "模型回复被截断：本次输出上限 $maxTokens tokens" +
+        (completionTokens?.let { "，实际输出 $it tokens" } ?: "，服务未提供输出用量") +
+        "。可能达到输出或上下文上限，请精简源码、测试或对话；未加载不完整规则。")
 
 class DeepSeekClient(
     private val apiKey: String,
@@ -41,14 +53,17 @@ class DeepSeekClient(
         .retryOnConnectionFailure(false)
         .build(),
 ) : AgentClient {
-    override fun reply(messages: List<ChatMessage>, stream: Boolean): Flow<AgentEvent> = flow {
+    override fun reply(messages: List<ChatMessage>, stream: Boolean): Flow<AgentEvent> = reply(messages,stream,ReplyBudget.CHAT)
+
+    override fun reply(messages: List<ChatMessage>, stream: Boolean, maxTokens: Int): Flow<AgentEvent> = flow {
+        require(maxTokens in 1..ReplyBudget.GAME)
         if (apiKey.isBlank()) throw AgentException("未配置 API Key，请在 .key 中配置后重新构建调试版。")
         val payload = buildJsonObject {
             put("model", model)
             put("messages", agentJson.encodeToJsonElement(messages))
             put("thinking", buildJsonObject { put("type", "disabled") })
             put("response_format", buildJsonObject { put("type", "json_object") })
-            put("max_tokens", 8192)
+            put("max_tokens", maxTokens)
             put("temperature", 0.2) // Favor stable structured rule output over sampling variety.
             put("stream", stream)
         }
@@ -80,7 +95,7 @@ class DeepSeekClient(
                             val root = agentJson.parseToJsonElement(buffer.readUtf8()).jsonObject
                             val choice = root["choices"]?.jsonArray?.firstOrNull()?.jsonObject
                                 ?: throw AgentException("服务返回空回复，请重试。")
-                            checkFinish(choice["finish_reason"]?.jsonPrimitive?.contentOrNull)
+                            checkFinish(choice["finish_reason"]?.jsonPrimitive?.contentOrNull,maxTokens,root["usage"])
                             val content = choice["message"]?.jsonObject?.get("content")?.jsonPrimitive?.contentOrNull
                                 ?: throw AgentException("服务返回空回复，请重试。")
                             val events = decoder.append(content)
@@ -103,7 +118,7 @@ class DeepSeekClient(
                                     decoder.append(it).forEach { event -> emit(event) }
                                 }
                                 choice["finish_reason"]?.jsonPrimitive?.contentOrNull?.let {
-                                    checkFinish(it)
+                                    checkFinish(it,maxTokens,chunk["usage"])
                                     finished = true
                                 }
                             }
@@ -129,9 +144,10 @@ class DeepSeekClient(
         }
     }.flowOn(Dispatchers.IO)
 
-    private fun checkFinish(reason: String?) {
+    private fun checkFinish(reason: String?, maxTokens: Int, usage: JsonElement?) {
+        if (reason == "length") throw ReplyLengthException(maxTokens,
+            (usage as? JsonObject)?.get("completion_tokens")?.jsonPrimitive?.intOrNull)
         if (reason != "stop") throw AgentException(when (reason) {
-            "length" -> "回复达到长度限制，请缩小问题范围后重试。"
             "content_filter" -> "该请求暂时无法回答，请调整问题。"
             else -> "模型未能完成回复，请重试。"
         })

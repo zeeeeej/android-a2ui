@@ -5,13 +5,14 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 
-val agentJson = Json { ignoreUnknownKeys = true }
+val agentJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
 @Serializable
 data class ChatMessage(val role: String, val content: String)
 
 @Serializable
-data class AgentReply(val text: String, val a2uiMessages: List<JsonObject>)
+data class AgentReply(val text: String = "", val a2uiMessages: List<JsonObject> = emptyList(),
+    val gamePlan: JsonObject? = null, val review: JsonObject? = null)
 
 sealed interface AgentEvent {
     data class Text(val text: String) : AgentEvent
@@ -112,11 +113,16 @@ class ReplyDecoder {
 
     fun finish(): AgentEvent.Complete {
         val reply = try {
-            agentJson.decodeFromString<AgentReply>(raw.toString())
+            val root = agentJson.parseToJsonElement(raw.toString()) as? JsonObject ?: throw ReplyFormatException(raw.toString())
+            val decoded = agentJson.decodeFromString<AgentReply>(raw.toString())
+            if (decoded.gamePlan == null && decoded.review == null && !("text" in root && "a2uiMessages" in root)) throw ReplyFormatException(raw.toString())
+            decoded
         } catch (_: Exception) {
             throw ReplyFormatException(raw.toString())
         }
-        if (reply.text.isBlank() && reply.a2uiMessages.isEmpty()) throw AgentException("模型返回了空回复，请重试。")
+        if ((reply.gamePlan != null || reply.review != null) && (reply.text.isNotBlank() || reply.a2uiMessages.isNotEmpty()) || reply.gamePlan != null && reply.review != null)
+            throw ReplyFormatException(raw.toString())
+        if (reply.text.isBlank() && reply.a2uiMessages.isEmpty() && reply.gamePlan == null && reply.review == null) throw AgentException("模型返回了空回复，请重试。")
         if (reply.a2uiMessages.size > 64) throw AgentException("卡片数量过多，请缩小问题范围。")
         return AgentEvent.Complete(reply, raw.toString())
     }

@@ -12,7 +12,7 @@ object ScriptGameComponent : A2uiComponent {
     override val description = "原生 Compose 棋盘；动态 JavaScript 规则仅在隔离进程执行。支持围棋、黑白棋、扫雷等，spec 接口见系统提示。"
     private val gameId = A2uiProperty.string("gameId", required = true, description = "与组件 id 相同")
     private val title = A2uiProperty.string("title", description = "游戏名称")
-    private val spec = A2uiProperty.any("spec", required = true, description = "version=1、source JS 表达式、config、可选 botPlayer/tickMs/tests")
+    private val spec = A2uiProperty.any("spec", required = true, description = "新游戏 version=2、source JS 表达式、config、players、initialPlayer、turnPolicy、可选 tickMs/tests；兼容旧 version=1")
     override val properties = listOf(gameId,title,spec)
     @Composable
     override fun A2uiComponentScope.Content(properties: A2uiComponentProperties, modifier: Modifier) {

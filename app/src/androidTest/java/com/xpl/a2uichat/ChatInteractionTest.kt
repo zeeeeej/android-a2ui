@@ -141,7 +141,7 @@ class ChatInteractionTest {
         assertTrue(vm.canInteract(surfaceId))
     }
 
-    @Test fun newChatCancelsPendingResponseWithoutLeakingIntoNextSession() {
+    @Test fun newChatRequiresStoppingPendingResponseWithoutLeakingIntoNextSession() {
         launch(object : AgentClient {
             override fun reply(messages: List<ChatMessage>, stream: Boolean) = flow {
                 emit(AgentEvent.Text("生成中"))
@@ -151,6 +151,9 @@ class ChatInteractionTest {
         compose.runOnUiThread { vm.send("长回复") }
         compose.waitUntil { vm.state.value.messages.lastOrNull()?.text == "生成中" }
         compose.runOnUiThread { vm.newChat() }
+        assertTrue(vm.state.value.busy)
+        compose.onNodeWithTag("new_chat").assertIsNotEnabled()
+        compose.runOnUiThread { vm.stop(); vm.newChat() }
         compose.waitForIdle()
         assertFalse(vm.state.value.busy)
         assertTrue(vm.state.value.messages.isEmpty())

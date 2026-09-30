@@ -9,17 +9,20 @@ internal fun JsonObject.number(key: String, default: Int = 0) = (get(key) as? Js
 internal fun JsonObject.word(key: String, default: String = "") = (get(key) as? JsonPrimitive)?.contentOrNull ?: default
 
 data class ScriptProgram(val json: JsonObject, val source: String, val config: JsonObject, val botPlayer: Int?, val tickMs: Int) {
+    val version get() = json.number("version")
     companion object {
         fun parse(value: JsonObject): ScriptProgram {
             checkScript(value.toString().toByteArray().size <= 98304, "规则包超过 96 KiB")
-            checkScript(value.number("version") == 1, "version 必须为 1")
+            checkScript(value.number("version") in 1..2, "version 必须为 1 或 2")
+            if (value.number("version") == 2) validateV2Program(value)
             checkScript((value["source"] as? JsonPrimitive)?.isString == true, "source 必须是字符串")
             val source = value.word("source")
             checkScript(source.isNotBlank() && source.toByteArray().size <= 65536, "source 必须为不超过 64 KiB 的 JS 表达式")
             checkScript("config" !in value || value["config"] is JsonObject, "config 必须是对象")
             val config = value["config"] as? JsonObject ?: JsonObject(emptyMap())
             boundedJson(config, 8192)
-            val bot = value.number("botPlayer").takeIf { it != 0 }
+            val bot = if (value.number("version") == 2) value["players"]!!.jsonArray.map { it.jsonObject }
+                .firstOrNull { it.word("controller") == "bot" }?.number("id") else value.number("botPlayer").takeIf { it != 0 }
             checkScript("botPlayer" !in value || (value["botPlayer"] as? JsonPrimitive)?.intOrNull in 1..2, "botPlayer 必须为 1 或 2")
             checkScript(bot == null || bot in 1..2, "botPlayer 必须为 1 或 2")
             val tick = value.number("tickMs")
@@ -29,18 +32,29 @@ data class ScriptProgram(val json: JsonObject, val source: String, val config: J
             checkScript("tests" !in value || value["tests"] is JsonArray, "tests 必须为数据数组")
             val tests = value["tests"] as? JsonArray ?: JsonArray(emptyList())
             checkScript(tests.size <= 16 && tests.all { it is JsonObject && (it["actions"] as? JsonArray)?.size in 0..64 }, "tests 最多 16 个，每个最多 64 步")
+            if (value.number("version") == 2) tests.forEachIndexed { index, item ->
+                val test = item.jsonObject
+                checkScript("absentActions" !in test,"tests[$index].absentActions 放错层级：必须放入 tests[$index].expect.absentActions，不能修改规则来允许禁手")
+                checkScript(test.keys.all { it in setOf("seed","state","actions","expect") },"tests[$index] 含未知字段，只能 seed/state/actions/expect")
+                checkScript(test["expect"] is JsonObject && test["expect"]!!.jsonObject.isNotEmpty(),"tests[$index] 需要非空 expect 断言")
+                checkScript("state" !in test || test["state"] is JsonObject,"tests[$index].state 必须为对象")
+                checkScript("seed" !in test || (test["seed"] as? JsonPrimitive)?.intOrNull != null,"tests[$index].seed 必须为整数")
+            }
             return ScriptProgram(value, source, config, bot, tick)
         }
     }
 }
 
 data class ScriptButton(val label: String, val action: JsonObject)
+data class ScriptBinding(val action: JsonObject, val clicks: List<Pair<Int, Int>>)
 data class ScriptView(val width: Int, val height: Int, val cells: List<Int>, val palette: List<String>,
     val labels: List<String>, val marks: List<Int>, val intersections: Boolean, val status: String,
-    val phase: String, val turn: Int, val winner: Int?, val score: Double, val buttons: List<ScriptButton>, val tapType: String)
+    val phase: String, val turn: Int, val winner: Int?, val score: Double, val buttons: List<ScriptButton>, val tapType: String,
+    val autoGrid: Boolean = true, val drawings: List<JsonObject> = emptyList(),
+    val textColors: List<String> = emptyList(), val bindings: List<ScriptBinding> = emptyList(), val version: Int = 1)
 data class ScriptSnapshot(val state: JsonObject, val view: ScriptView, val actions: List<JsonObject>, val accepted: Boolean) {
     companion object {
-        fun parse(bytes: ByteArray): ScriptSnapshot {
+        fun parse(bytes: ByteArray, version: Int = 1): ScriptSnapshot {
             checkScript(bytes.size <= 262144, "回复超过 256 KiB")
             val obj = codec.parseToJsonElement(bytes.decodeToString()) as? JsonObject ?: throw RuleFault("ScriptGame 回复不是对象")
             checkScript(obj["ok"] == JsonPrimitive(true), obj.word("error", "隔离进程执行失败").take(300))
@@ -72,12 +86,17 @@ data class ScriptSnapshot(val state: JsonObject, val view: ScriptView, val actio
             checkScript(if (phase == "finished") actions.isEmpty() && winner != null else actions.isNotEmpty(), "未结束状态必须有合法动作；结束状态必须有 winner 且没有动作")
             checkScript(phase != "scoring" || buttons.isNotEmpty() && buttons.all { it.action in actions }, "计分按钮必须有对应合法动作")
             val tap = v.word("tapType", "tap")
+            val bindings = if (version == 2) validateV2View(v, actions, buttons, w, h) else emptyList()
             checkScript(tap.matches(Regex("[A-Za-z][A-Za-z0-9_]{0,31}")), "tapType 错误")
             checkScript(actions.all { a -> a.word("type") == "tick" ||
-                (a.word("type") == tap && a.keys == setOf("type","x","y") && a.number("x",-1) in 0 until w && a.number("y",-1) in 0 until h) ||
-                buttons.any { it.action == a } }, "每个合法动作都必须可操作：格子点击需 x/y，其他动作必须在 view.buttons 中提供按钮")
+                (version == 1 && a.word("type") == tap && a.keys == setOf("type","x","y") && a.number("x",-1) in 0 until w && a.number("y",-1) in 0 until h) ||
+                bindings.any { it.action == a } ||
+                buttons.any { it.action == a } }, if (version == 2) "双方完整合法动作都必须有 bindings 或按钮，电脑回合也不能省略；宿主会禁用人工操作" else "每个合法动作都必须可操作：格子点击需 x/y，其他动作必须在 view.buttons 中提供按钮")
             return ScriptSnapshot(state, ScriptView(w,h,cells,palette,labels,marks,v.word("style") == "intersections",
-                v.word("status").take(160), phase,turn,winner,(v["score"] as? JsonPrimitive)?.doubleOrNull ?: 0.0,buttons,tap),
+                v.word("status").take(160), phase,turn,winner,(v["score"] as? JsonPrimitive)?.doubleOrNull ?: 0.0,buttons,tap,
+                (v["autoGrid"] as? JsonPrimitive)?.booleanOrNull ?: true,
+                if (version == 2) (v["drawings"] as? JsonArray)?.map { it.jsonObject }.orEmpty() else emptyList(),
+                if (version == 2) v["textColors"]!!.jsonArray.map { it.jsonPrimitive.content } else emptyList(), bindings, version),
                 actions,obj["accepted"] == JsonPrimitive(true))
         }
         private fun action(value: JsonElement): JsonObject {

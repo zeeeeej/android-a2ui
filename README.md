@@ -2,7 +2,7 @@
 
 一个直接调用 DeepSeek 的原生 Android 聊天示例。使用 Kotlin、Jetpack Compose、Material 3 和 **AndroidX 官方 A2UI 渲染器**，把模型生成的 JSON 渲染为可填写、勾选和提交的原生卡片。
 
-支持连续对话、完整回复、流式回复、停止与重试、新建对话、浅色/深色主题。卡片支持 Text、Row、Column、Card、List、Button、TextField、CheckBox、Divider，以及原生小游戏 **Game2048、SnakeGame、RuleGame、ScriptGame**。ScriptGame 由模型动态生成 JavaScript 规则，在隔离进程执行，界面完全由 Compose 绘制；RuleGame 继续兼容受限 JSON 规则。增加新棋盘游戏无需修改 APK。仅保留当前内存会话；旋转或 Activity 重建保留消息、表单和游戏进度，进程结束后不恢复。
+支持连续对话、完整回复、流式回复、停止与重试、新建对话、最近对话与收藏、浅色/深色主题。卡片支持 Text、Row、Column、Card、List、Button、TextField、CheckBox、Divider，以及原生小游戏 **Game2048、SnakeGame、RuleGame、ScriptGame**。ScriptGame 由模型动态生成 JavaScript 规则，在隔离进程执行，界面完全由 Compose 绘制；RuleGame 继续兼容受限 JSON 规则。增加新棋盘游戏无需修改 APK。旋转或 Activity 重建保留游戏进度；进程结束后恢复聊天与规则，游戏重新开局并暂停。
 
 ## 构建与运行
 
@@ -25,12 +25,22 @@
 ## 使用
 
 - 首页可选择“规划今天”“安排周末”“随便聊聊”“玩 2048”“玩贪吃蛇”“玩俄罗斯方块”“玩五子棋”“玩围棋”（向下滚动可见），也可以直接输入问题。
-- 底部“流式”开关默认开启。关闭后等待完整结果再显示；开启后文字逐步出现，完整 A2UI 消息到达后逐步渲染卡片。
+- 底部“流式”开关默认开启。关闭后等待完整结果再显示；开启后普通回复文字逐步出现，卡片在完整协议确认后渲染，动态游戏还需通过验收才可操作。
 - 卡片表单会双向绑定数据；点击卡片中的提交按钮，将事件、表单实值和当前数据模型发给模型，继续对话。
 - 生成期间可以停止；失败或停止后可重新生成，替换该轮未完成结果。未完成回复不进入模型历史。
-- 新对话需要确认，随后清空当前消息、输入和卡片；没有会话数据库或后台持续游戏。脚本使用按需绑定的隔离服务，后台时停止发送游戏动作。
+- 自动在本机保存最近一段对话，重新打开 App 恢复消息、上下文和可交互卡片。顶部 ☆ 收藏当前整段对话，★ 取消收藏；右上角菜单的“收藏对话”可打开收藏继续聊天，后续消息同步更新同一条收藏。
+- 仅保留“当前对话 + 收藏”：新建或切换前会提示，未收藏的旧对话将被替换；已收藏的对话保留。取消非当前对话的收藏会确认后移除该记录。标题取第一条用户消息前 30 字，列表按最近更新时间排序。
+- 存档不包含棋局进度：恢复游戏重新开局并暂停，已生成但尚未应用的新规则仍需确认。未提交表单编辑不保证恢复。生成中退出会显示“已中断”，只在手动重新生成时再次请求模型；恢复和打开收藏本身不消耗模型 Token。
+- 数据以版本化 JSON 原子写入应用私有目录，不保存密钥或系统提示词，不上传云端；卸载/清除应用数据会丢失。损坏或不兼容存档保留原文件并提示重试，不静默覆盖；写入失败时禁止会丢失当前记录的切换。旧版本仅在内存中的对话无法迁移。
+- 没有后台持续游戏。脚本使用按需绑定的隔离服务，后台时停止发送游戏动作。
 
-模型默认 `deepseek-flash`，关闭思考模式，单次最多 8192 输出 token，`temperature=0.2` 以减少结构化规则输出的随机性。模型名及 API 地址集中在 `app/build.gradle.kts` 中配置。应用不包含联网搜索、订票或支付等外部工具。
+模型默认 `deepseek-flash`，关闭思考模式；普通聊天/需求提取最多 8192、动态游戏生成 32768、独立复核 16384 输出 token。`temperature=0.2` 以减少结构化规则输出的随机性。截断提示显示请求额度及服务返回的实际输出用量（如有）；动态游戏生成/复核截断使用原有最多 3 次共享修复预算，不新增无限重试。模型名及 API 地址集中在 `app/build.gradle.kts` 中配置。应用不包含联网搜索、订票或支付等外部工具。
+
+### 最近对话与收藏验证
+
+- `ConversationArchiveTest` 覆盖版本化快照、历史约束、收藏去重及最近对话替换；`ConversationPersistenceTest` 覆盖恢复后续聊、中断重试、失败候选隔离、各类卡片重新开局、待确认规则、损坏文件、原子写入和保存/切换竞争。
+- `ConversationProcessDeathTest` 默认跳过。仅指定 `-e conversationProcessDeath prepare` 时备份原存档并写入模拟对话；在外部执行 `am force-stop` 后重新启动 App，再用 `verify` 检查最近对话和收藏，最后用 `cleanup` 恢复测试前的存档。三阶段均通过 `-e class com.xpl.a2uichat.ConversationProcessDeathTest` 单独运行，不调用真实模型。
+- 本轮在 `3B15AC00KT300000` 验证：61 项 JVM 测试通过，真实 API 测试默认跳过；38 项聊天/收藏/游戏交互测试和 8 项隔离测试通过。隔离测试有一次约 92 秒的异常停顿，采集线程诊断后完成，未据此修改引擎或宣称已定位原因。
 
 ### 生成与试玩小游戏
 
@@ -42,7 +52,7 @@
 - 点击“全屏”展开，点击“收起”或返回键回到聊天卡片，进度保持一致。2048/贪吃蛇支持棋盘内滑动；RuleGame 使用点击和按钮，具体控件由规则决定。
 - 贪吃蛇和规则游戏离屏、切换全屏、进入后台或 AI 回复期间会暂停，需要手动继续；同时最多一局需要计时或电脑操作的游戏运行。
 - 每步操作和计时都在本地执行，**不会调用模型**。点击“让 AI 点评”发送游戏类型、成绩、状态等摘要；点击“让 AI 修复规则”会发送当前规则与错误。不会自动发送整张棋盘。
-- 标题更新保留进度；贪吃蛇难度变更下一局生效。RuleGame / ScriptGame 的新规则先暂存，点击“应用新规则并重开”才替换当前规则和进度。新建对话、删除或替换游戏组件会清理对应进度，没有排行榜或持久化存档。
+- 标题更新保留进度；贪吃蛇难度变更下一局生效。RuleGame / ScriptGame 的新规则先暂存，点击“应用新规则并重开”才替换当前规则和进度。新建/切换对话、删除或替换游戏组件会清理对应进度；聊天存档保存游戏规则，但没有排行榜或棋局进度存档。
 
 2048 和贪吃蛇仍使用已有的专用组件，其他网格/棋盘玩法优先使用 ScriptGame。可以继续测试不预置的新变体，例如：
 
@@ -74,22 +84,30 @@ RuleGame 不是任意代码执行器：没有 WebView，不生成或执行 JavaS
 
 ### ScriptGame 动态 JavaScript 接口
 
-可以直接说“创建一个围棋我玩玩”“生成黑白棋和电脑玩”“生成首击安全的扫雷”或“改成 7 路围棋、白贴 5.5 目”。默认围棋提示要求 9 路、黑先、白贴 7.5、提子、禁自杀和全局同形禁着；双方停一手后进入死子标记阶段，再确认面积计分或恢复对局。这些规则由模型生成，不是按游戏名称切换内置引擎，生成结果仍可能有规则错误。
+可以直接说“创建一个围棋我玩玩”“生成黑白棋和电脑玩”“生成首击安全的扫雷”或“改成 7 路围棋、白贴 5.5 目”。新动态游戏先提取结构化需求，再生成 v2 规则，最后独立复核；没有按游戏名称切换的内置引擎，也没有预生成的象棋规则。生成结果仍可能有规则错误。
 
-组件为 `ScriptGame`，`spec` 包含 `version:1`、`source`、`config` 和可选 `botPlayer`、`tickMs`、`tests`。`source` 是返回函数对象的 JavaScript **表达式**（不是 ES module），例如 `(() => { …; return {init,legalActions,step,view,evaluate}; })()`。
+组件为 `ScriptGame`，新 `spec` 包含 `version:2`、`source`、`config`、`players`、`initialPlayer`、`turnPolicy` 和可选 `tickMs`、`tests`。`players` 明确 id、标签、颜色、人类/电脑控制器，不从颜色索引推测角色。v1 存档保留并显示“旧协议”，不会自动请求模型升级。`source` 是返回函数对象的 JavaScript **表达式**（不是 ES module），例如 `(() => { …; return {init,legalActions,step,view,evaluate}; })()`。
 
-- `init(config, seed)` 返回 JSON 状态；`legalActions(state)` 返回含 `type` 的动作对象数组；`step(state, action)` 返回 `{accepted, state}`。
-- `view(state)` 返回原生棋盘描述：尺寸、格子颜色索引、可选文字和标记、状态、回合、阶段及按钮。阶段支持 `playing/scoring/finished`，点击是 `{type:"tap",x,y}`；停一手、确认、恢复等也是普通动作。
-- 有电脑时提供 `evaluate(state, player)`，同一合法动作接口用于玩家和电脑。电脑最多两层、12 个候选、500ms 预算，超时优先采用已算出的合法动作；不是专业棋力。
+- `init(config, seed)` 只返回初始 JSON 状态，不能替电脑先走；`legalActions(state)` 返回双方共用的完整动作；`step(state, action)` 返回 `{accepted, state}`，一次只走一步。`alternating` 检查换手，`extraTurn` 允许连走但电脑连续 8 步后暂停。
+- `view(state)` 返回尺寸、颜色、每格明确的 `textColors`、文字/标记、状态/回合/阶段、按钮和 `bindings`。bindings 将一个完整动作绑定到一次点击，或“起点→终点”两次点击；选中、取消、重选仅在 Compose 内，不改变规则状态或触发电脑。
+- `drawings` 支持归一化坐标的 line/polyline/rect/circle/text，最多 256 项，依背景、网格、装饰、棋子、交互提示顺序绘制；可关闭默认网格。绘图与点击使用同一块按宽高约束缩放的棋盘。没有游戏专用河界或宫格组件。
+- 有电脑时提供 `evaluate(state, player)`；宿主按实际行动方极大/极小化，迭代加深最多 4 个完整动作、每层最多 12 个搜索候选、1 秒预算，超时采用已算出的合法动作，无合法检查点则保留旧棋局并暂停；不是专业棋力。
 - 每次操作新建虚拟机，所有持久状态必须放在 JSON 中。没有 Date/Math.random，随机玩法必须用显式 seed 和 state 内 PRNG。状态只在主进程验证成功后提交；取消或崩溃不会覆盖旧棋局。
-- 新游戏收齐并通过隔离启动探测后才可交互。格式、编译或启动校验失败最多自动修复三次（含首次生成最多四次请求），通过即停止；网络失败和取消不自动修复。更新现有游戏先暂存，需点击“应用新规则并重开”。运行时错误可继续重试或“让 AI 修复规则”，修复会发送当前规则源码及错误。
+- 新 v2 游戏经过协议/启动/需求检查，再由独立模型调用检查原始需求、源码、实际初始帧和操作轨迹，执行复核者提供的有界声明式测试。生成与复核共享最多 3 次修复：1 次提取 + 最多 4 次生成 + 最多 4 次复核，共不超过 9 次请求；本地检查失败跳过该次复核，网络失败和取消不自动修复。普通聊天/表单/成绩点评仍一次请求。
+- “仔细检查”只返回发现，不修改卡片。明确要求修复/更新时只能更新目标组件，新规则暂存，需点击“应用新规则并重开”。失败候选不进入成功上下文、不替换有效游戏。
+- 消息下可展开“需求与检查结果”。报告绑定规则、配置、需求和验收版本的 SHA-256 指纹，规则变化后旧报告标记失效。计划和报告随最近对话/收藏保存，恢复时重做本地检查但不请求模型。报告只是对当次候选的有限验收，不是规则正确性证明。
+- 兼容收到的旧 v1 规则回复，但明确标注仅通过旧启动检查、未经过新需求验收；v2 回复不能绕过需求计划。旧游戏不会静默重写，需明确要求升级。
 - 点击“开始 / 继续”后游玩；离屏、后台、切换全屏、聊天生成时暂停。计分阶段不会自动触发电脑，可使用脚本声明的死子标记和确认按钮。
 
 安全边界：官方 QuickJS **2026-06-04** 固定源码随 APK 编译，MIT 许可证和上游哈希见 [UPSTREAM.md](app/src/main/cpp/quickjs/UPSTREAM.md)。JNI 只在 `exported=false`、`isolatedProcess=true` 的服务中加载；通过异步 AIDL 传递有大小限制的 UTF-8 JSON，不传聊天记录、密钥、Context 或 Android 对象。不注册 IO/Java 桥，不编译 quickjs-libc，不加载模块、远程 DEX/SO 或 QuickJS 字节码，也没有 WebView。隔离不是对未来引擎漏洞的绝对保证，需要持续跟进上游安全修复；Debug APK 本身仍含可提取的测试密钥，不能分发。
 
-限制：源码 64 KiB、状态 128 KiB、回复 256 KiB、堆 32 MiB、栈 512 KiB、棋盘最大 20×20、按钮最多 8 个。普通操作 200ms、电脑 500ms、启动测试 2 秒；引擎中断与服务独立看门狗共同限制执行，主进程处理 Binder 死亡并保留快照。启动探测不是形式化验证，无法证明任意 AI 生成规则始终正确。
+限制：源码 64 KiB、状态 128 KiB、回复 256 KiB、堆 32 MiB、栈 512 KiB、棋盘最大 20×20、按钮最多 8 个。普通操作 200ms、电脑 1 秒、启动测试 2 秒；引擎中断与服务独立看门狗共同限制执行，主进程处理 Binder 死亡并保留快照。启动探测不是形式化验证，无法证明任意 AI 生成规则始终正确。
 
-精确协议见 [ScriptPrompt.kt](app/src/main/java/com/xpl/a2uichat/games/script/ScriptPrompt.kt)。测试脚本位于 `androidTest/assets/script`；另有 [ScriptExamples.kt](app/src/main/java/com/xpl/a2uichat/games/script/ScriptExamples.kt) 中经过测试的围棋教学源码随提示提供给模型，以减少提子、全局同形和整块死子标记错误。它不会由运行时按游戏名称直接加载；实际游玩的规则仍来自模型回复。数据自测支持 `expect.absentActions` 检查禁手。
+精确协议见 [ScriptPrompt.kt](app/src/main/java/com/xpl/a2uichat/games/script/ScriptPrompt.kt)，需求/复核协议见 [GameVerification.kt](app/src/main/java/com/xpl/a2uichat/games/script/GameVerification.kt)。测试脚本位于 `androidTest/assets/script`；旧 [ScriptExamples.kt](app/src/main/java/com/xpl/a2uichat/games/script/ScriptExamples.kt) 仅保留兼容性测试，不再加入新生成提示。测试支持指定 state、动作序列、view 精确断言、必须合法及必须非法的动作。
+
+本次真实 DeepSeek 验收尚未通过：现场请求原始棋盘需求和 7×9 连线棋变体时，多次遇到非法测试动作、越界绘图、复核断言错误或执行资源超限，均在发布前拦截。不能据此宣称任意游戏都能稳定生成；也没有以预置逻辑或放宽校验来让验收通过。`GameV2LiveTest` 保留为显式启用的验收测试，当前可能失败并消耗额度。
+
+通用实现验证：69 项 JVM 测试通过（另 1 项真实 API 测试默认跳过），`3B15AC00KT300000` 上 58 项模拟模型/交互/持久化/隔离测试通过，包括完整动作选择、需求误匹配、共享 9 次调用上限、只检查不修改、规则暂存、报告恢复和 1 秒电脑超时回退。Debug/Release 构建、lint（0 错误、10 项现有警告）和密钥隔离检查通过。
 
 ## 实现结构
 
@@ -149,9 +167,9 @@ adb -s 3B15AC00KT300000 shell am instrument -w -r \
   -e class com.xpl.a2uichat.LiveDeepSeekTest -e runLive true \
   com.xpl.a2uichat.test/androidx.test.runner.AndroidJUnitRunner
 
-# ScriptGame：真实生成围棋、黑白棋、扫雷、7路围棋变体
+# ScriptGame v2：现场生成用户棋盘需求及非预置变体（可能最多各 9 次 API 调用）
 adb -s 3B15AC00KT300000 shell am instrument -w -r \
-  -e class com.xpl.a2uichat.ScriptLiveTest -e runScriptLive true \
+  -e class com.xpl.a2uichat.GameV2LiveTest -e runGameV2Live true \
   com.xpl.a2uichat.test/androidx.test.runner.AndroidJUnitRunner
 ```
 

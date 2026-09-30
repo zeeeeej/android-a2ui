@@ -33,7 +33,7 @@ class GameSandboxService : Service() {
                 var kill = watchdog.schedule({ if (active.get() == id) Process.killProcess(Process.myPid()) }, 2600,TimeUnit.MILLISECONDS)
                 try {
                     val op = Json.parseToJsonElement(request.decodeToString()).jsonObject.word("op")
-                    val budget = when (op) { "validate" -> 2000L; "bot" -> 500L; else -> 200L }
+                    val budget = when (op) { "validate" -> 2000L; "bot" -> 1000L; else -> 200L }
                     kill.cancel(false)
                     kill = watchdog.schedule({ if (active.get() == id) Process.killProcess(Process.myPid()) }, budget+500,TimeUnit.MILLISECONDS)
                     val result = NativeScript.run(source,runner,request,budget)

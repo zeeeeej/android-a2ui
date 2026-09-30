@@ -45,6 +45,7 @@ fun RuleGame(gameId: String, title: String, source: JsonObject, modifier: Modifi
     if (!host.enabled && host.store.findRule(key) == null) { Text("正在验证游戏规则…", modifier.padding(16.dp)); return }
     val session = remember(host.store, key) { host.store.rule(key, source) }
     val frame by session.frame.collectAsState()
+    LaunchedEffect(frame.spec) { if (frame.spec != null) host.store.onRulesChanged() }
     LaunchedEffect(source) { if (host.enabled) session.offer(source) }
     // An update may arrive while the surface is disabled; offer it when the transaction commits.
     LaunchedEffect(host.enabled) { if (host.enabled) session.offer(source) else session.pause() }

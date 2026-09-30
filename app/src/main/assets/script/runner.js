@@ -23,6 +23,7 @@
     return isArray(v) ? '['+v.map(canonical).join(',')+']' : '{'+keys(v).sort().map(k=>stringify(k)+':'+canonical(v[k])).join(',')+'}';
   };
   return (game, request, checkpoint) => {
+    const v2 = request.version === 2;
     for (const fn of ['init','legalActions','step','view']) if (typeof game[fn] !== 'function') throw Error('Missing '+fn);
     if (request.botPlayer && typeof game.evaluate !== 'function') throw Error('Bot requires evaluate(state, player)');
     function frame(s, accepted = true) {
@@ -31,6 +32,41 @@
       const actions = clean(game.legalActions(clone(state)));
       if (!isArray(actions) || actions.length > 512) throw Error('legalActions must be array <=512');
       const view = clean(game.view(clone(state)));
+      if (v2) {
+        const allowed = ['width','height','cells','palette','labels','marks','style','status','phase','turn','winner','score','buttons','tapType','autoGrid','drawings','textColors','bindings'];
+        if (keys(view).some(k=>!allowed.includes(k))) throw Error('Unknown v2 view field');
+        if (!request.players.some(p=>p.id===view.turn)) throw Error('turn must reference players');
+        if (!isArray(view.textColors) || view.textColors.length!==view.width*view.height || !view.textColors.every(c=>/^#[0-9a-fA-F]{6}$/.test(c))) throw Error('Explicit textColors required');
+        if (view.autoGrid!==undefined && typeof view.autoGrid!=='boolean') throw Error('autoGrid must be boolean');
+        if (view.drawings!==undefined && (!isArray(view.drawings) || view.drawings.length>256)) throw Error('drawings limit');
+        for (const d of (view.drawings||[])) {
+          const geometry={line:['x','y','x2','y2'],polyline:['points'],rect:['x','y','width','height','fill'],circle:['x','y','radius','fill'],text:['x','y','text','size']}[d.type];
+          if(!geometry||keys(d).some(k=>!geometry.concat(['type','layer','color','stroke']).includes(k))||!['background','grid','decoration'].includes(d.layer)||typeof d.color!=='string'||!/^#[0-9a-fA-F]{6}$/.test(d.color))throw Error('Invalid drawing type/fields/layer/color');
+          function number(k,min=0,max=1){if(typeof d[k]!=='number'||!finite(d[k])||d[k]<min||d[k]>max)throw Error('Drawing '+k+' out of range');return d[k];}
+          if(d.stroke!==undefined)number('stroke',.001,.05);
+          if(d.fill!==undefined&&typeof d.fill!=='boolean')throw Error('Drawing fill must be boolean');
+          if(d.type==='polyline') {
+            if(!isArray(d.points)||d.points.length<2||d.points.length>64||!d.points.every(p=>isArray(p)&&p.length===2&&p.every(n=>typeof n==='number'&&finite(n)&&n>=0&&n<=1)))throw Error('Invalid polyline points');
+          } else {
+            const x=number('x'),y=number('y');
+            if(d.type==='line'){number('x2');number('y2');}
+            if(d.type==='rect'&&(x+number('width',.001)>1.000001||y+number('height',.001)>1.000001))throw Error('Rectangle outside board');
+            if(d.type==='circle')number('radius',.001,.5);
+            if(d.type==='text'){number('size',.005,.2);if(typeof d.text!=='string'||d.text.length<1||d.text.length>64)throw Error('Drawing text limit');}
+          }
+        }
+        const bindings=view.bindings || [];
+        if (!isArray(bindings) || bindings.length>512) throw Error('bindings limit');
+        const paths=new Set(), bound=new Set();
+        for(const b of bindings) {
+          if(keys(b).sort().join(',')!=='action,clicks' || !actions.some(a=>canonical(a)===canonical(b.action)) || !isArray(b.clicks) || b.clicks.length<1 || b.clicks.length>2 ||
+            !b.clicks.every(p=>isArray(p)&&p.length===2&&Number.isInteger(p[0])&&Number.isInteger(p[1])&&p[0]>=0&&p[0]<view.width&&p[1]>=0&&p[1]<view.height)) throw Error('Invalid complete-action binding');
+          const path=canonical(b.clicks), id=canonical(b.action);
+          if(paths.has(path)||bound.has(id))throw Error('Duplicate binding'); paths.add(path);bound.add(id);
+        }
+        if(bindings.some(a=>bindings.some(b=>a.clicks.length<b.clicks.length&&canonical(a.clicks)===canonical(b.clicks.slice(0,a.clicks.length)))))throw Error('Ambiguous click prefix');
+        if((view.buttons||[]).some(b=>!actions.some(a=>canonical(a)===canonical(b.action))))throw Error('Button not legal');
+      }
       if (!Number.isInteger(view.width) || !Number.isInteger(view.height) || view.width < 2 || view.width > 20 || view.height < 2 || view.height > 20)
         throw Error('view width/height must be 2..20');
       const colors = view.palette || ['#DDBB77','#222222','#FFFFFF','#66AA88'];
@@ -44,8 +80,8 @@
       for (const a of actions) {
         if (!a || typeof a !== 'object' || typeof a.type !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(a.type) || stringify(a).length > 512) throw Error('Invalid action');
         const id = canonical(a); if (seen.has(id)) throw Error('Duplicate action'); seen.add(id);
-        if (a.type !== 'tick' && !(a.type === (view.tapType || 'tap') && keys(a).length === 3 && Number.isInteger(a.x) && Number.isInteger(a.y) && a.x >= 0 && a.x < view.width && a.y >= 0 && a.y < view.height) &&
-            !(view.buttons || []).some(b => canonical(b.action) === id)) throw Error('Action '+a.type+' needs a view.buttons entry');
+        if (a.type !== 'tick' && !(v2 ? (view.bindings||[]).some(b=>canonical(b.action)===id) : (a.type === (view.tapType || 'tap') && keys(a).length === 3 && Number.isInteger(a.x) && Number.isInteger(a.y) && a.x >= 0 && a.x < view.width && a.y >= 0 && a.y < view.height)) &&
+            !(view.buttons || []).some(b => canonical(b.action) === id)) throw Error(v2 ? 'Every legal action needs view.bindings or buttons, INCLUDING BOT TURN; native UI disables human input. Missing: '+stringify(a) : 'Action '+a.type+' needs a view.buttons entry');
       }
       if (view.phase !== 'finished' && !actions.length) throw Error('Non-finished state has no legal actions');
       if (view.phase === 'finished' && (actions.length || ![0,1,2].includes(view.winner))) throw Error('Finished state needs winner and empty legalActions');
@@ -58,10 +94,19 @@
       if (!f.actions.some(x => canonical(x) === canonical(a))) { f.accepted = false; return f; }
       const result = game.step(clone(s),clone(a));
       if (!result || typeof result.accepted !== 'boolean') throw Error('step must return {accepted:boolean,state:object}');
-      return result.accepted ? frame(result.state) : frame(s,false);
+      const next=result.accepted ? frame(result.state) : frame(s,false);
+      if(v2 && result.accepted) {
+        if(canonical(next.state)===canonical(f.state))throw Error('Complete action did not advance state');
+        if(request.turnPolicy==='alternating' && f.view.phase==='playing' && next.view.phase==='playing' && next.view.turn===f.view.turn)throw Error('Complete action must switch player');
+      }
+      return next;
     }
     function encode(f) { const text = stringify(clean(f)); if (text.length > 262144) throw Error('Response limit'); return text; }
-    const init = seed => frame(game.init(clone(request.config || {}), seed));
+    const init = seed => {
+      const f=frame(game.init(clone(request.config || {}), seed));
+      if(v2 && f.view.turn!==request.initialPlayer)throw Error('init must preserve initialPlayer; never execute a bot move inside init');
+      return f;
+    };
     if (request.op === 'init') return encode(init(request.seed));
     if (request.op === 'step') return encode(apply(request.state,request.action));
     if (request.op === 'validate') {
@@ -85,16 +130,17 @@
       }
       if (request.botPlayer) { const n = game.evaluate(clone(a.state),request.botPlayer); if (!finite(n)) throw Error('evaluate must return finite number'); }
       for (const [testIndex,test] of (request.tests || []).entries()) {
-        let f = init(test.seed === undefined ? 12345 : test.seed);
+        let f = test.state ? frame(clone(test.state)) : init(test.seed === undefined ? 12345 : test.seed);
         for (const [stepIndex,action] of test.actions.entries()) {
           const before=f; f=apply(f.state,action);
           const expectedRejection=(test.expect?.absentActions || []).some(x=>canonical(x)===canonical(action));
-          if(!f.accepted && !expectedRejection)throw Error('Self-test '+testIndex+' step '+stepIndex+' rejected '+stringify(action)+'; legal examples: '+stringify(before.actions.slice(0,4)).slice(0,160));
+          if(!f.accepted && !expectedRejection)throw Error('Self-test '+testIndex+' step '+stepIndex+' rejected '+stringify(action)+'; turn='+before.view.turn+'; if intentional illegal test, list in expect.absentActions (not top-level); otherwise correct test action. Legal: '+stringify(before.actions.slice(0,3)).slice(0,100));
         }
         for (const k of keys(test.expect || {})) {
           if (k === 'cells') { for (const [x,y,n] of test.expect.cells) if (f.view.cells[y*f.view.width+x] !== n) throw Error('Self-test cell mismatch'); }
           else if (k === 'absentActions') { for (const a of test.expect.absentActions) if (f.actions.some(x=>canonical(x)===canonical(a))) throw Error('Self-test forbidden action was legal'); }
-          else if (canonical(f.view[k]) !== canonical(test.expect[k])) throw Error('Self-test mismatch: '+k);
+          else if (k === 'legalActions') { for (const a of test.expect.legalActions) if (!f.actions.some(x=>canonical(x)===canonical(a))) throw Error('Required action missing'); }
+          else if (canonical(f.view[k]) !== canonical(test.expect[k])) throw Error('Self-test '+testIndex+' mismatch: '+k+' expected='+canonical(test.expect[k])+' actual='+canonical(f.view[k]));
         }
       }
       return encode(a);
@@ -107,6 +153,34 @@
         const n = game.evaluate(clone(f.state),player);
         if (!finite(n)) throw Error('evaluate must return finite number');
         return Math.max(-1e8,Math.min(1e8,n));
+      }
+      if(v2) {
+        // Native deadline interrupts this bounded search; checkpoints are always complete legal turns.
+        let roots=[];
+        for(const action of root.actions) {
+          const f=apply(root.state,action);
+          if(!f.accepted)throw Error('Bot legal action rejected');
+          if(!roots.length)checkpoint(encode(f));
+          const score=evaluate(f); roots.push({f,score});
+          if(roots.length===1||score>roots[0].score){roots.sort((a,b)=>b.score-a.score);checkpoint(encode(roots[0].f));}
+        }
+        roots.sort((a,b)=>b.score-a.score); roots=roots.slice(0,12);
+        function search(f,depth,alpha,beta) {
+          if(depth===0||f.view.phase!=='playing')return evaluate(f);
+          const maximize=f.view.turn===player;
+          let candidates=f.actions.slice(0,12).map(a=>{const n=apply(f.state,a);if(!n.accepted)throw Error('Rejected search action');return {f:n,score:evaluate(n)};});
+          candidates.sort((a,b)=>maximize?b.score-a.score:a.score-b.score);
+          let best=maximize?-Infinity:Infinity;
+          for(const c of candidates){const n=search(c.f,depth-1,alpha,beta);best=maximize?Math.max(best,n):Math.min(best,n);if(maximize)alpha=Math.max(alpha,best);else beta=Math.min(beta,best);if(beta<=alpha)break;}
+          return best;
+        }
+        let chosen=roots[0].f;
+        for(let depth=2;depth<=4;depth++) {
+          let best=-Infinity, next=chosen;
+          for(const c of roots){const n=search(c.f,depth-1,-Infinity,Infinity);if(n>best){best=n;next=c.f;}}
+          chosen=next; checkpoint(encode(chosen));
+        }
+        return encode(chosen);
       }
       let candidates = [], best = -Infinity;
       for (const action of root.actions) {

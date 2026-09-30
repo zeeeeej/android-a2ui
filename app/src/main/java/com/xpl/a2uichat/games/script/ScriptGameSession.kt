@@ -16,9 +16,11 @@ class ScriptGameSession(override val key: GameKey, source: JsonObject) : Playabl
     private val mutableFrame = MutableStateFlow(ScriptFrame())
     val frame = mutableFrame.asStateFlow()
     private var activeSource = source
+    fun activeRules(): JsonObject = activeSource
     private var job: Job? = null
     private var epoch = 0
     private var seed = 1
+    private var botChain = 0
     init { restart() }
     fun offer(source: JsonObject) { mutableFrame.value = frame.value.copy(pending = source.takeIf { it != activeSource }) }
     override fun pause() {
@@ -27,6 +29,7 @@ class ScriptGameSession(override val key: GameKey, source: JsonObject) : Playabl
     }
     override fun resume() {
         if (frame.value.snapshot == null) { restart(); return }
+        botChain = 0
         mutableFrame.value = frame.value.copy(paused = false,error = null)
         computer()
     }
@@ -35,6 +38,7 @@ class ScriptGameSession(override val key: GameKey, source: JsonObject) : Playabl
         val candidate = if (apply) frame.value.pending ?: activeSource else activeSource
         val generation = epoch
         seed++
+        botChain = 0
         mutableFrame.value = frame.value.copy(computing = true,error = null)
         job = scope.launch {
             try {
@@ -53,11 +57,15 @@ class ScriptGameSession(override val key: GameKey, source: JsonObject) : Playabl
         val f = frame.value; val s = f.snapshot ?: return; val p = f.program ?: return
         if (f.paused || f.computing || action !in s.actions || s.view.phase == "finished" ||
             (s.view.phase == "playing" && s.view.turn == p.botPlayer)) return
+        botChain = 0
         execute("step",action)
     }
     private fun computer() {
         val f = frame.value; val s = f.snapshot ?: return
-        if (!f.paused && !f.computing && s.view.phase == "playing" && s.view.turn == f.program?.botPlayer) execute("bot",null)
+        if (!f.paused && !f.computing && s.view.phase == "playing" && s.view.turn == f.program?.botPlayer) {
+            if (botChain >= 8) fail(IllegalStateException("电脑连续行动达到 8 次上限，已暂停；请检查回合规则"))
+            else { botChain++; execute("bot",null) }
+        }
     }
     private fun execute(op: String, action: JsonObject?) {
         val f = frame.value; val snapshot = f.snapshot ?: return; val program = f.program ?: return

@@ -12,6 +12,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 class GameApplication : Application() {
+    val conversations by lazy { com.xpl.a2uichat.chat.FileConversationRepository(java.io.File(filesDir, "conversations.json")) }
     override fun onCreate() { super.onCreate(); ScriptSandbox.initialize(this) }
 }
 
@@ -73,6 +74,12 @@ class ScriptSandbox private constructor(private val context: Application) {
             val id = ids.incrementAndGet()
             val request = buildJsonObject {
                 put("op",op); put("config",program.config); put("seed",seed)
+                put("version",program.version)
+                if (program.version == 2) {
+                    put("players",program.json["players"]!!)
+                    put("initialPlayer",program.json["initialPlayer"]!!)
+                    put("turnPolicy",program.json["turnPolicy"]!!)
+                }
                 program.botPlayer?.let { put("botPlayer",it) }
                 state?.let { put("state",it) }; action?.let { put("action",it) }
                 if (op == "validate") put("tests",program.json["tests"] ?: JsonArray(emptyList()))
@@ -82,7 +89,7 @@ class ScriptSandbox private constructor(private val context: Application) {
             try {
                 remote.execute(id,program.source.toByteArray(),request,callback)
                 val bytes = withTimeout(3500) { result.await() }
-                ScriptSnapshot.parse(bytes)
+                ScriptSnapshot.parse(bytes, program.version)
             } catch (e: TimeoutCancellationException) {
                 runCatching { remote.shutdown() }; died(); throw RuleFault("脚本执行超时；原棋局已保留")
             } catch (e: CancellationException) { throw e }

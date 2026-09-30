@@ -39,6 +39,7 @@ class DeepSeekClientTest {
         assertEquals("json_object", body.getValue("response_format").jsonObject.getValue("type").jsonPrimitive.content)
         assertEquals(0.2, body.getValue("temperature").jsonPrimitive.double, 0.0)
         assertEquals(2, body.getValue("messages").jsonArray.size)
+        assertEquals(8192, body.getValue("max_tokens").jsonPrimitive.int)
     }
 
     private fun streamBody(finish: String = "stop", done: Boolean = true): String = buildString {
@@ -59,6 +60,16 @@ class DeepSeekClientTest {
         val events = client.reply(listOf(ChatMessage("user", "你好")), true).toList()
         assertEquals("你好", (events.last() as AgentEvent.Complete).reply.text)
         assertTrue(events.any { it is AgentEvent.Text })
+    }
+
+    @Test fun gameBudgetAndTruncationDiagnostics() = runBlocking {
+        server.enqueue(MockResponse().setBody("""{"choices":[{"finish_reason":"length","message":{"content":"incomplete"}}],"usage":{"completion_tokens":32768}}"""))
+        val error = runCatching { client.reply(emptyList(),false,ReplyBudget.GAME).toList() }.exceptionOrNull()
+        assertTrue(error is ReplyLengthException)
+        assertEquals(32768,(error as ReplyLengthException).completionTokens)
+        assertEquals(32768,error.maxTokens)
+        val body = agentJson.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+        assertEquals(32768,body["max_tokens"]!!.jsonPrimitive.int)
     }
 
     @Test fun missingDoneAndTokenLimitAreFailures() = runBlocking {

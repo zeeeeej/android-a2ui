@@ -71,7 +71,7 @@ class RuleGameSession(override val key: GameKey, source: JsonObject) : PlayableS
         try {
             val spec = RuleSpec.parse(source)
             val state = RuleEngine(spec).initial()
-            synchronized(lock) { if (!closed) mutableFrame.value = RuleFrame(spec = spec, state = state) }
+            synchronized(lock) { if (!closed) mutableFrame.value = RuleFrame(spec = spec, state = state, pending = frame.value.pending) }
         } catch (e: Exception) {
             synchronized(lock) { if (!closed) mutableFrame.value = frame.value.copy(error = e.message ?: "初始化失败") }
         }
