@@ -1,0 +1,13 @@
+.key
+local.properties
+.gradle/
+.gradle-home/
+.kotlin/
+.tools/
+.android-sdk/
+.android-user/
+.idea/
+**/build/
+*.iml
+*.hprof
+.DS_Store
