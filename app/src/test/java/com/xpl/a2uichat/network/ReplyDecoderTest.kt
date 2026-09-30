@@ -62,6 +62,16 @@ class ReplyDecoderTest {
         assertThrows(AgentException::class.java) { ReplyDecoder().append("x".repeat(ReplyDecoder.MAX_RESPONSE_CHARS + 1)) }
     }
 
+    @Test fun malformedRuleReplyRetainsBoundedCandidateOnlyForRepair() {
+        val broken = """{"text":"游戏","a2uiMessages":[{"component":"RuleGame","spec":{"version":1]}}]}"""
+        val fault = assertThrows(ReplyFormatException::class.java) { ReplyDecoder().append(broken) }
+        assertTrue(fault.containsRuleGame)
+        assertEquals(broken, fault.partialReply)
+        assertFalse(fault.message!!.contains("spec"))
+        val ordinary = assertThrows(ReplyFormatException::class.java) { ReplyDecoder().append("""{"text":"聊天" ]""") }
+        assertFalse(ordinary.containsRuleGame)
+    }
+
     @Test fun sseHandlesCommentsMultilineAndDone() {
         val decoder = SseDecoder()
         assertNull(decoder.line(": keepalive"))

@@ -11,6 +11,9 @@ import com.xpl.a2uichat.a2ui.SurfaceGuard
 import com.xpl.a2uichat.a2ui.toJsonValue
 import com.xpl.a2uichat.network.*
 import com.xpl.a2uichat.games.GameSessionStore
+import com.xpl.a2uichat.games.rules.RuleFault
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -18,6 +21,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
+
+private const val MAX_GAME_REPAIRS = 3
 
 enum class MessageStatus { Generating, Complete, Failed, Stopped }
 
@@ -129,52 +134,86 @@ class ChatViewModel(
         games.pauseAll()
         val ownEpoch = ++epoch
         mutableState.value = state.value.copy(busy = true, retryId = null)
-        val transaction = guard.copy()
         val existing = guard.ids
-        val deferred = mutableListOf<JsonObject>()
         val before = guard.snapshotMessages(session.snapshotData())
-        val touched = mutableSetOf<String>()
         val stream = state.value.streaming
         generation = viewModelScope.launch {
             try {
                 val system = AgentPrompt.system() + "\n本轮新 surfaceId 前缀：${turn.prefix}；可更新的已有 surfaceId：${existing.joinToString()}。"
-                val messages = listOf(ChatMessage("system", system)) + turn.baseHistory + ChatMessage("user", turn.apiContent)
-                if (messages.sumOf { it.content.length } > 220_000) {
-                    throw AgentException("当前对话过长，请新建对话后继续。")
-                }
-                client.reply(messages, stream).collect { event ->
-                    if (ownEpoch != epoch) return@collect
-                    when (event) {
-                        is AgentEvent.Text -> update(turn.id) { it.copy(text = event.text) }
-                        is AgentEvent.UiMessage -> {
-                            val id = transaction.accept(event.message, turn.prefix)
-                            session.validate(event.message)
-                            touched += id
-                            if (id in existing) deferred += event.message
-                            else {
-                                turn.created += id
-                                surfaceOwners[id] = turn.id
-                                session.apply(event.message)
-                                update(turn.id) { it.copy(surfaceIds = (it.surfaceIds + id).distinct()) }
+                val baseMessages = listOf(ChatMessage("system", system)) + turn.baseHistory + ChatMessage("user", turn.apiContent)
+                var repairMessages = emptyList<ChatMessage>()
+                repeat(MAX_GAME_REPAIRS + 1) { attempt ->
+                    val transaction = guard.copy()
+                    val deferred = mutableListOf<JsonObject>()
+                    val deferredSurfaces = existing.toMutableSet()
+                    val previewIds = existing.toMutableSet()
+                    val touched = mutableSetOf<String>()
+                    val candidate = mutableListOf<JsonObject>()
+                    var candidateText = ""
+                    try {
+                        val messages = baseMessages + repairMessages
+                        if (messages.sumOf { it.content.length } > 220_000) {
+                            throw AgentException("当前对话过长，请新建对话后继续。")
+                        }
+                        client.reply(messages, stream).collect { event ->
+                            if (ownEpoch != epoch) return@collect
+                            when (event) {
+                                is AgentEvent.Text -> {
+                                    candidateText = event.text
+                                    update(turn.id) { it.copy(text = event.text) }
+                                }
+                                is AgentEvent.UiMessage -> {
+                                    candidate += event.message
+                                    // Rule compilation and startup probes must never block the UI thread.
+                                    val id = withContext(Dispatchers.Default) { transaction.accept(event.message, turn.prefix) }
+                                    session.validate(event.message)
+                                    touched += id
+                                    val isRuleUpdate = event.message["updateComponents"]?.jsonObject?.get("components")?.jsonArray
+                                        ?.any { it.jsonObject["component"]?.jsonPrimitive?.content in setOf("RuleGame", "ScriptGame") } == true
+                                    if (isRuleUpdate) deferredSurfaces += id
+                                    if (id !in existing) {
+                                        turn.created += id
+                                        surfaceOwners[id] = turn.id
+                                        update(turn.id) { it.copy(surfaceIds = (it.surfaceIds + id).distinct()) }
+                                    }
+                                    if (id in deferredSurfaces) deferred += event.message else {
+                                        session.apply(event.message)
+                                        if ("createSurface" in event.message) previewIds += id
+                                        if ("deleteSurface" in event.message) previewIds -= id
+                                    }
+                                }
+                                is AgentEvent.Complete -> {
+                                    transaction.validateComplete()
+                                    transaction.scriptPrograms(touched).forEach { com.xpl.a2uichat.games.script.ScriptSandbox.shared().validate(it) }
+                                    A2uiSession.validateTransaction(before + event.reply.a2uiMessages, transaction.ids)
+                                    session.awaitApplied(previewIds)
+                                    if (touched.any { it in invalidSurfaces }) throw AgentException("卡片无法显示，请重试。")
+                                    deferred.forEach { session.apply(it) }
+                                    session.awaitApplied(transaction.ids)
+                                    if (touched.any { it in invalidSurfaces }) throw AgentException("卡片更新失败，请重试。")
+                                    guard = transaction
+                                    games.retain(guard.gameKeys())
+                                    history = turn.baseHistory + ChatMessage("user", turn.apiContent) + ChatMessage("assistant", event.raw)
+                                    update(turn.id) { it.copy(text = event.reply.text, status = MessageStatus.Complete) }
+                                }
                             }
                         }
-                        is AgentEvent.Complete -> {
-                            transaction.validateComplete()
-                            A2uiSession.validateTransaction(before + event.reply.a2uiMessages, transaction.ids)
-                            session.awaitApplied(existing + (transaction.ids - existing))
-                            if (touched.any { it in invalidSurfaces }) throw AgentException("卡片无法显示，请重试。")
-                            deferred.forEach { session.apply(it) }
-                            session.awaitApplied(transaction.ids)
-                            if (touched.any { it in invalidSurfaces }) throw AgentException("卡片更新失败，请重试。")
-                            guard = transaction
-                            games.retain(guard.gameKeys())
-                            history = turn.baseHistory + ChatMessage("user", turn.apiContent) + ChatMessage("assistant", event.raw)
-                            update(turn.id) { it.copy(text = event.reply.text, status = MessageStatus.Complete) }
+                        if (state.value.messages.find { it.id == turn.id }?.status == MessageStatus.Generating) {
+                            throw AgentException("回复尚未完成，请重试。")
                         }
+                        return@launch
+                    } catch (fault: Exception) {
+                        val malformed = fault as? ReplyFormatException
+                        if (fault !is RuleFault && malformed?.containsRuleGame != true) throw fault
+                        if (attempt == MAX_GAME_REPAIRS) throw AgentException("规则仍未通过校验：${fault.message}。已自动修复 $MAX_GAME_REPAIRS 次，可重新生成。")
+                        discardPartial(turn)
+                        session.awaitApplied(existing)
+                        val repairNumber = attempt + 1
+                        update(turn.id) { it.copy(text = "正在修复游戏规则（$repairNumber/$MAX_GAME_REPAIRS）…", error = null) }
+                        val raw = malformed?.partialReply ?: agentJson.encodeToString(AgentReply(candidateText, candidate))
+                        repairMessages = listOf(ChatMessage("assistant", raw), ChatMessage("user",
+                            "游戏规则启动校验失败：${fault.message?.take(300)}。请修复并重新输出完整回复 JSON，使用同一本轮前缀；严格遵守对应 ScriptGame 或 RuleGame 接口。上一候选的新卡片已全部回滚，不再存在！当前仍存在的 surfaceId 只有：${existing.joinToString().ifEmpty { "无" }}。新游戏必须重新输出 createSurface 后再 updateComponents，不能只更新已回滚的卡片。不要省略原游戏所需规则。这是第 $repairNumber/$MAX_GAME_REPAIRS 次自动修复，请根据最新错误修正规则及自测，不要跳过校验。"))
                     }
-                }
-                if (state.value.messages.find { it.id == turn.id }?.status == MessageStatus.Generating) {
-                    throw AgentException("回复尚未完成，请重试。")
                 }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
@@ -215,9 +254,11 @@ class ChatViewModel(
         }
         val details = event.context.values.filterNotNull().joinToString(" · ").take(100)
         val label = if (event.type == "game_result") {
-            val name = if (event.context["game"] == "snake") "贪吃蛇" else "2048"
+            val name = if (event.context["game"] in setOf("rulegame", "scriptgame")) event.context["title"]?.toString()?.take(80) ?: "规则游戏"
+                else if (event.context["game"] == "snake") "贪吃蛇" else "2048"
             "$name 得分 ${event.context["score"]}，请帮我点评"
-        } else if (details.isBlank()) "已提交卡片" else "已提交：$details"
+        } else if (event.type in setOf("rule_repair", "script_repair")) "请修复游戏规则：${event.context["title"] ?: "当前游戏"}"
+        else if (details.isBlank()) "已提交卡片" else "已提交：$details"
         startTurn(label, payload.toString())
     }
 

@@ -1,6 +1,7 @@
 package com.xpl.a2uichat.a2ui
 
 import androidx.a2ui.compose.ui.toJsonSchemaString
+import com.xpl.a2uichat.games.rules.RulePrompt
 
 object AgentPrompt {
     fun system(schema: String = chatCatalog.toJsonSchemaString()): String = """
@@ -29,7 +30,11 @@ object AgentPrompt {
         每个游戏必填 gameId，必须等于它的组件 id；title 可选（1～80 字），SnakeGame 的 difficulty 可选 easy/normal/hard，默认 normal。
         游戏作为 root 时 gameId 也必须为 root；配置使用字面值，不使用数据绑定。游戏规则和每步操作由客户端运行。
         收到 name=game_result 的用户事件时，只根据 context 的真实成绩和状态点评、给建议，a2uiMessages 保持 []。
-        除非用户明确要求新游戏或改配置，否则不要创建、替换或删除原有游戏。其他尚未支持的游戏请说明目前支持 2048 和贪吃蛇。
+        除非用户明确要求新游戏、改配置或修复，否则不要创建、替换或删除原有游戏。
+
+        ${RulePrompt.instructions()}
+
+        ${com.xpl.a2uichat.games.script.ScriptPrompt.instructions()}
 
         有效游戏示例（surfaceId 要替换为本轮前缀；2048 用 Game2048 并省略 difficulty）：
         ${gameExample("EXAMPLE_game", "SnakeGame")}

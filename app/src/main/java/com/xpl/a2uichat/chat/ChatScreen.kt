@@ -187,6 +187,9 @@ private fun Welcome(onSuggestion: (String) -> Unit) {
         item { Suggestion("03", "随便聊聊", "探索一个新知识，或理清一个想法", "用一个生活中的例子，简单解释什么是 AI Agent。", onSuggestion) }
         item { Suggestion("04", "玩 2048", "滑动合并数字，挑战 2048", "生成一个可以玩的 2048。", onSuggestion) }
         item { Suggestion("05", "玩贪吃蛇", "来一局轻松的原生小游戏", "来一局简单难度的贪吃蛇。", onSuggestion) }
+        item { Suggestion("06", "玩俄罗斯方块", "AI 生成规则，在本地运行", "生成俄罗斯方块让我玩。", onSuggestion) }
+        item { Suggestion("07", "玩五子棋", "与本地电脑对手下棋", "生成一个有电脑对手的五子棋让我玩。", onSuggestion) }
+        item { Suggestion("08", "玩围棋", "动态规则 · 原生棋盘 · 休闲电脑", "创建一个9路围棋我玩玩，与休闲电脑对弈，支持死子标记和确认计分。", onSuggestion) }
     }
 }
 

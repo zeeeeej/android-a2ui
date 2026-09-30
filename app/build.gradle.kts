@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
@@ -10,6 +12,12 @@ fun String.asJavaString() = "\"" + replace("\\", "\\\\").replace("\"", "\\\"")
     .replace("\n", "\\n").replace("\r", "\\r") + "\""
 
 android {
+    ndkVersion = "29.0.13599879"
+    val tools = Properties().apply {
+        rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
+    }
+    tools.getProperty("ndk.path")?.let { ndkPath = it }
+    externalNativeBuild { cmake { path = file("src/main/cpp/CMakeLists.txt"); version = "3.22.1" } }
     namespace = "com.xpl.a2uichat"
     compileSdk { version = release(37) { minorApiLevel = 1 } }
     defaultConfig {
@@ -19,6 +27,7 @@ android {
         versionCode = 1
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64") }
         buildConfigField("String", "DEEPSEEK_MODEL", "\"deepseek-flash\"")
         buildConfigField("String", "DEEPSEEK_URL", "\"https://api.deepseek.com/chat/completions\"")
     }
@@ -29,7 +38,7 @@ android {
         debug { buildConfigField("String", "DEEPSEEK_API_KEY", localKey.get().asJavaString()) }
         release { buildConfigField("String", "DEEPSEEK_API_KEY", "\"\"") }
     }
-    buildFeatures { compose = true; buildConfig = true }
+    buildFeatures { compose = true; buildConfig = true; aidl = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

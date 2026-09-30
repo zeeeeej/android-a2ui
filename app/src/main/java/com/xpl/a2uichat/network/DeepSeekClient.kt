@@ -49,6 +49,7 @@ class DeepSeekClient(
             put("thinking", buildJsonObject { put("type", "disabled") })
             put("response_format", buildJsonObject { put("type", "json_object") })
             put("max_tokens", 8192)
+            put("temperature", 0.2) // Favor stable structured rule output over sampling variety.
             put("stream", stream)
         }
         val call = http.newCall(Request.Builder().url(endpoint)

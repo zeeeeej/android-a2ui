@@ -2,6 +2,8 @@ package com.xpl.a2uichat.a2ui
 
 import com.xpl.a2uichat.network.AgentException
 import com.xpl.a2uichat.games.GameKey
+import com.xpl.a2uichat.games.rules.RuleSpec
+import com.xpl.a2uichat.games.rules.RuleFault
 import kotlinx.serialization.json.*
 
 /** Bounded static component trees keep model output inside the app's supported catalog. */
@@ -29,6 +31,11 @@ class SurfaceGuard(private val catalogId: String = CHAT_CATALOG_ID) {
         surfaces.forEach { (id, components) -> guard.surfaces[id] = LinkedHashMap(components) }
     }
 
+    fun scriptPrograms(surfaceIds: Set<String>): List<com.xpl.a2uichat.games.script.ScriptProgram> =
+        gameKeys().filter { it.type == "ScriptGame" && it.surfaceId in surfaceIds }.map {
+            com.xpl.a2uichat.games.script.ScriptProgram.parse(surfaces.getValue(it.surfaceId).getValue(it.gameId).getValue("spec").jsonObject)
+        }.distinctBy { it.json }.also { if (it.size > 3) throw RuleFault("每轮最多校验 3 个 ScriptGame") }
+
     fun accept(message: JsonObject, newPrefix: String): String {
         requireUi(message["version"]?.jsonPrimitive?.content in setOf("v0.9", "v0.9.1"))
         val kinds = message.keys.filter { it != "version" }
@@ -54,8 +61,14 @@ class SurfaceGuard(private val catalogId: String = CHAT_CATALOG_ID) {
                     val componentId = component["id"]?.jsonPrimitive?.contentOrNull ?: invalid()
                     requireUi(componentId.length in 1..100)
                     requireUi(component["component"]?.jsonPrimitive?.content in COMPONENTS)
-                    validateGame(component, componentId)
-                    forbidUnsupported(component)
+                    try {
+                        validateGame(component, componentId)
+                        forbidUnsupported(component)
+                    } catch (e: AgentException) {
+                        if (component["component"]?.jsonPrimitive?.content == "ScriptGame")
+                            throw RuleFault("ScriptGame 组件 $componentId 元数据错误：gameId 必须与 id 相同，title<=80字，无 difficulty/children/child/call/checks/validationRegexp")
+                        throw e
+                    }
                     current[componentId] = component
                 }
                 requireUi(current.size <= 80)
@@ -151,13 +164,21 @@ class SurfaceGuard(private val catalogId: String = CHAT_CATALOG_ID) {
             requireUi(type == "SnakeGame" && difficulty?.isString == true && difficulty.content in setOf("easy", "normal", "hard"))
         }
         requireUi("children" !in component && "child" !in component)
+        if (type == "RuleGame") {
+            val spec = component["spec"] as? JsonObject ?: throw RuleFault("RuleGame 缺少 spec 对象")
+            RuleSpec.parse(spec)
+        }
+        if (type == "ScriptGame") {
+            val spec = component["spec"] as? JsonObject ?: throw RuleFault("ScriptGame 缺少 spec 对象")
+            com.xpl.a2uichat.games.script.ScriptProgram.parse(spec)
+        }
     }
 
     private fun requireUi(condition: Boolean) { if (!condition) invalid() }
     private fun invalid(): Nothing = throw AgentException("卡片结构无效，请重试或要求生成更简单的卡片。")
 
     companion object {
-        val GAME_COMPONENTS = setOf("Game2048", "SnakeGame")
+        val GAME_COMPONENTS = setOf("Game2048", "SnakeGame", "RuleGame", "ScriptGame")
         val COMPONENTS = setOf("Text", "Row", "Column", "Card", "List", "Button", "TextField", "CheckBox", "Divider") + GAME_COMPONENTS
     }
 }

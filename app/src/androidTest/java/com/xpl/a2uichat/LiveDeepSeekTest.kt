@@ -110,6 +110,51 @@ class LiveDeepSeekTest {
         screenshot("10-game-snake-card")
     }
 
+    @Test fun generatedRuleGamesAndUnseenVariants() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("runLive") == "true")
+        val prompts = listOf(
+            "生成15×15的五子棋让我玩，五连获胜，使用本地电脑对手。",
+            "生成10×20的俄罗斯方块让我玩。",
+            "生成8×8的四子棋，四连获胜，使用本地电脑对手。",
+            "生成6×12的下落方块游戏，只用三格直条与三格L形，每消一行75分。",
+        )
+        prompts.forEachIndexed { index, prompt ->
+            compose.runOnUiThread { model().newChat() }
+            runTurn("$prompt 只创建一张 RuleGame 卡片，直接作为 root。", index % 2 == 1)
+            compose.waitUntil(10_000) { compose.onAllNodesWithTag("rule_board").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithTag("rule_board").performScrollTo()
+            val key = GameKey(model().surfaces.value.single().id, "root", "RuleGame")
+            val session = model().games.findRule(key)!!
+            compose.waitUntil(5000) { session.frame.value.state != null }
+            assertEquals(listOf(15, 10, 8, 6)[index], session.frame.value.spec!!.width)
+            assertEquals(listOf(15, 20, 8, 12)[index], session.frame.value.spec!!.height)
+            compose.onNodeWithTag("rule_expand").performScrollTo().performClick()
+            compose.onNodeWithTag("rule_result").assertIsDisplayed()
+            session.frame.value.spec!!.controls.lastOrNull()?.let { control ->
+                compose.onNodeWithTag("rule_${control.id}").assertIsDisplayed()
+            }
+            compose.onNodeWithTag("rule_run").performClick()
+            if (index % 2 == 0) {
+                compose.onNodeWithTag("rule_board").performTouchInput { click(center) }
+                compose.waitUntil(5000) { session.frame.value.state!!.cells.count { it != 0 } >= 2 && !session.frame.value.computing }
+                assertEquals(1, session.frame.value.state!!.turn)
+            } else {
+                compose.waitUntil(50_000) { session.frame.value.state!!.cells.any { it != 0 } }
+            }
+            compose.onNodeWithTag("rule_run").performClick()
+            val played = session.frame.value.state
+            screenshot("11-rule-$index-fullscreen")
+            compose.onNodeWithTag("rule_expand").performClick()
+            compose.activityRule.scenario.recreate()
+            compose.runOnIdle {
+                assertSame(session, model().games.findRule(key))
+                assertEquals(played, session.frame.value.state)
+                assertTrue(session.frame.value.paused)
+                assertEquals(2, model().state.value.messages.size)
+            }
+        }
+    }
+
     @Test fun completeThenStreamingEndToEnd() {
         assumeTrue(InstrumentationRegistry.getArguments().getString("runLive") == "true")
         runTurn("请用一句话解释 AI Agent，不生成卡片。", false)

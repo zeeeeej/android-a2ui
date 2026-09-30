@@ -130,6 +130,11 @@ class ChatInteractionTest {
         compose.waitUntil(10_000) { !vm.state.value.busy }
         assertEquals(MessageStatus.Failed, vm.state.value.messages.last().status)
         assertEquals("保留这段有效文字", vm.state.value.messages.last().text)
+        // Hiding the IME can temporarily detach the test host's semantics root.
+        compose.waitUntil(5000) {
+            compose.onAllNodesWithTag("messages").fetchSemanticsNodes(atLeastOneRootRequired = false).isNotEmpty()
+        }
+        compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
         compose.onNodeWithTag("messages").performScrollToIndex(1)
         compose.onNodeWithText("想去的城市").assertExists()
         compose.onNodeWithText("上海").assertExists()

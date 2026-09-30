@@ -1,6 +1,7 @@
 package com.xpl.a2uichat.network
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 
@@ -18,7 +19,12 @@ sealed interface AgentEvent {
     data class Complete(val reply: AgentReply, val raw: String) : AgentEvent
 }
 
-class AgentException(message: String) : Exception(message)
+open class AgentException(message: String) : Exception(message)
+
+/** Bounded model output for one repair attempt; never include it in logs or user-facing errors. */
+class ReplyFormatException(val partialReply: String) : AgentException("回复未完整生成或格式无效，请重试。") {
+    val containsRuleGame get() = Regex("\"component\"\\s*:\\s*\"(?:RuleGame|ScriptGame)\"").containsMatchIn(partialReply)
+}
 
 /** Frames complete A2UI objects without confusing JSON brackets inside strings.
  * Only the root text field is exposed incrementally; no raw JSON reaches the chat UI.
@@ -39,7 +45,11 @@ class ReplyDecoder {
     private var messageCount = 0
     private var emittedText = ""
 
-    fun append(fragment: String): List<AgentEvent> {
+    fun append(fragment: String): List<AgentEvent> = try { appendInternal(fragment) }
+    catch (e: AgentException) { throw e }
+    catch (_: SerializationException) { throw ReplyFormatException(raw.toString()) }
+
+    private fun appendInternal(fragment: String): List<AgentEvent> {
         if (raw.length + fragment.length > MAX_RESPONSE_CHARS) {
             throw AgentException("回复过长，请缩小问题范围后重试。")
         }
@@ -78,7 +88,7 @@ class ReplyDecoder {
                 }
                 '}', ']' -> {
                     val expected = if (c == '}') '{' else '['
-                    if (stack.removeLastOrNull() != expected) throw AgentException("回复格式无效，请重试。")
+                    if (stack.removeLastOrNull() != expected) throw ReplyFormatException(raw.toString())
                     if (c == '}' && stack.size == 2 && messageArray && objectStart >= 0) {
                         if (++messageCount > 64) throw AgentException("卡片数量过多，请缩小问题范围。")
                         events += AgentEvent.UiMessage(agentJson.decodeFromString<JsonObject>(raw.substring(objectStart, i + 1)))
@@ -104,7 +114,7 @@ class ReplyDecoder {
         val reply = try {
             agentJson.decodeFromString<AgentReply>(raw.toString())
         } catch (_: Exception) {
-            throw AgentException("回复未完整生成或格式无效，请重试。")
+            throw ReplyFormatException(raw.toString())
         }
         if (reply.text.isBlank() && reply.a2uiMessages.isEmpty()) throw AgentException("模型返回了空回复，请重试。")
         if (reply.a2uiMessages.size > 64) throw AgentException("卡片数量过多，请缩小问题范围。")

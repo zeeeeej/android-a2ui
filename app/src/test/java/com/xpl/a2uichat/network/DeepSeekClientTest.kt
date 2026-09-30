@@ -37,6 +37,7 @@ class DeepSeekClientTest {
         val body = agentJson.parseToJsonElement(request.body.readUtf8()).jsonObject
         assertFalse(body.getValue("stream").jsonPrimitive.boolean)
         assertEquals("json_object", body.getValue("response_format").jsonObject.getValue("type").jsonPrimitive.content)
+        assertEquals(0.2, body.getValue("temperature").jsonPrimitive.double, 0.0)
         assertEquals(2, body.getValue("messages").jsonArray.size)
     }
 

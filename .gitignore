@@ -11,3 +11,4 @@ local.properties
 *.iml
 *.hprof
 .DS_Store
+**/.cxx/

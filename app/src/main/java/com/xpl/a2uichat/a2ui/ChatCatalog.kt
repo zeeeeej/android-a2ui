@@ -10,6 +10,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.xpl.a2uichat.games.gameComponents
+import com.xpl.a2uichat.games.rules.RuleGameComponent
 
 const val CHAT_CATALOG_ID = "https://xpl.dev/a2ui/chat/v1/catalog.json"
 
@@ -25,7 +26,7 @@ val chatCatalog by lazy {
     A2uiCatalog(
         catalogId = CHAT_CATALOG_ID,
         components = listOf(Defaults.text, Defaults.row, Defaults.column, Defaults.card,
-            BoundedList, Defaults.button, Defaults.textField, Defaults.checkBox, Defaults.divider) + gameComponents,
+            BoundedList, Defaults.button, Defaults.textField, Defaults.checkBox, Defaults.divider) + gameComponents + RuleGameComponent + com.xpl.a2uichat.games.script.ScriptGameComponent,
         isInline = true,
     )
 }
